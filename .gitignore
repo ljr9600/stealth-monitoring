@@ -1,0 +1,3 @@
+# Runtime data lives in Docker named volumes (prometheus-data,
+# grafana-data), not in the repo — nothing to ignore there.
+*.log
