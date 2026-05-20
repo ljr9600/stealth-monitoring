@@ -1,0 +1,13 @@
+# Dashboard provider — auto-loads every JSON in /dashboards on boot.
+# The JSON files live in this repo under grafana/dashboards/ and are
+# bind-mounted to /dashboards (see docker-compose.yml).
+apiVersion: 1
+providers:
+  - name: monitoring
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /dashboards
+      foldersFromFilesStructure: false
