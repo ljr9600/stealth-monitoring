@@ -750,7 +750,11 @@
     "list": [
       {
         "allValue": ".*",
-        "current": {},
+        "current": {
+          "selected": true,
+          "text": "localhost:8189",
+          "value": "localhost:8189"
+        },
         "datasource": "prometheus",
         "definition": "label_values({__name__=~\"container.*\"},instance)",
         "description": null,
@@ -760,7 +764,13 @@
         "label": "Host",
         "multi": false,
         "name": "host",
-        "options": [],
+        "options": [
+          {
+            "selected": true,
+            "text": "localhost:8189",
+            "value": "localhost:8189"
+          }
+        ],
         "query": {
           "query": "label_values({__name__=~\"container.*\"},instance)",
           "refId": "Prometheus-host-Variable-Query"
@@ -777,7 +787,11 @@
       },
       {
         "allValue": ".*",
-        "current": {},
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
         "datasource": "prometheus",
         "definition": "label_values({__name__=~\"container.*\", instance=~\"$host\"},name)",
         "description": null,
@@ -787,7 +801,13 @@
         "label": "Container",
         "multi": false,
         "name": "container",
-        "options": [],
+        "options": [
+          {
+            "selected": true,
+            "text": "All",
+            "value": "$__all"
+          }
+        ],
         "query": {
           "query": "label_values({__name__=~\"container.*\", instance=~\"$host\"},name)",
           "refId": "Prometheus-container-Variable-Query"
