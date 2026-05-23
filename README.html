@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>README</title>
+<style>
+:root {
+  --fg: #24292f;
+  --muted: #57606a;
+  --bg: #ffffff;
+  --accent: #0969da;
+  --border: #d0d7de;
+  --code-bg: #f6f8fa;
+}
+* { box-sizing: border-box; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  color: var(--fg);
+  background: var(--bg);
+  max-width: 1100px;
+  margin: 40px auto;
+  padding: 0 24px 80px;
+  line-height: 1.55;
+}
+h1 { font-size: 2em; border-bottom: 2px solid var(--border); padding-bottom: 8px; margin-top: 1.2em; }
+h2 { font-size: 1.5em; border-bottom: 1px solid var(--border); padding-bottom: 6px; margin-top: 1.8em; }
+h3 { font-size: 1.2em; margin-top: 1.6em; }
+h4 { font-size: 1.05em; margin-top: 1.4em; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: var(--code-bg);
+  padding: 0.15em 0.4em;
+  border-radius: 4px;
+  font-size: 0.92em;
+}
+pre {
+  background: var(--code-bg);
+  padding: 16px;
+  border-radius: 6px;
+  overflow-x: auto;
+  line-height: 1.45;
+}
+pre code { background: transparent; padding: 0; font-size: 0.9em; }
+table { border-collapse: collapse; margin: 1em 0; }
+th, td { border: 1px solid var(--border); padding: 8px 12px; text-align: left; }
+th { background: var(--code-bg); font-weight: 600; }
+blockquote {
+  border-left: 4px solid var(--border);
+  margin-left: 0;
+  padding: 0 16px;
+  color: var(--muted);
+}
+hr { border: 0; border-top: 1px solid var(--border); margin: 2em 0; }
+.mermaid { background: var(--code-bg); padding: 12px; border-radius: 6px; margin: 1em 0; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({startOnLoad:true, theme:'default'});</script>
+</head>
+<body>
+<h1 id="monitoring">monitoring</h1>
+<blockquote>
+<p>Auto-generated stub README. Add a service description, build/run instructions, and other notes here.</p>
+</blockquote>
+<h2 id="external-dependencies">External dependencies</h2>
+<blockquote>
+<p>Per the <a href="../../docs/CODING_STANDARDS.md#-every-service-must-document-its-external-resource-locations">rule in <code>~/dev/docs/CODING_STANDARDS.md</code></a>, every service must document where its external resources live. This section was auto-generated from a code scan on 2026-05-23 and curated.</p>
+</blockquote>
+<h3 id="host-bind-mounts-docker-composeyml">Host bind-mounts (<code>docker-compose.yml</code>)</h3>
+<table>
+<thead>
+<tr>
+<th>Host path</th>
+<th>Container path</th>
+<th>Flag</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>/var/run</code></td>
+<td><code>/var/run</code></td>
+<td><code>ro</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>/sys</code></td>
+<td><code>/sys</code></td>
+<td><code>ro</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>/var/lib/docker/</code></td>
+<td><code>/var/lib/docker</code></td>
+<td><code>ro</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>/dev/disk/</code></td>
+<td><code>/dev/disk</code></td>
+<td><code>ro</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>/etc/localtime</code></td>
+<td><code>/etc/localtime</code></td>
+<td><code>ro</code></td>
+<td>Timezone consistency (read-only)</td>
+</tr>
+<tr>
+<td><code>/etc/localtime</code></td>
+<td><code>/etc/localtime</code></td>
+<td><code>ro</code></td>
+<td>Timezone consistency (read-only)</td>
+</tr>
+<tr>
+<td><code>/etc/localtime</code></td>
+<td><code>/etc/localtime</code></td>
+<td><code>ro</code></td>
+<td>Timezone consistency (read-only)</td>
+</tr>
+<tr>
+<td><code>/etc/localtime</code></td>
+<td><code>/etc/localtime</code></td>
+<td><code>ro</code></td>
+<td>Timezone consistency (read-only)</td>
+</tr>
+</tbody>
+</table>
+<h3 id="external-http-apis-third-party">External HTTP APIs (third-party)</h3>
+<ul>
+<li><strong>github.com</strong> — 1 reference(s) in code</li>
+<li><strong>grafana.com</strong> — 1 reference(s) in code</li>
+</ul>
+<h3 id="environment-variables-relevant-to-external-resources">Environment variables relevant to external resources</h3>
+<ul>
+<li><code>HOST</code></li>
+<li><code>MONITORING_LOG_DIR</code></li>
+</ul>
+<h3 id="backup-story">Backup story</h3>
+<ul>
+<li><strong>TODO</strong> — fill in: which of the above resources is critical, what backs each one up, how to recover. (Auto-generated section; please complete with service-specific detail.)</li>
+</ul>
+<h3 id="per-host-differences-30-dev-vs-50-prod">Per-host differences (<code>.30</code> dev vs <code>.50</code> prod)</h3>
+<ul>
+<li><strong>TODO</strong> — fill in: are the bind-mount paths / DB hosts / external endpoints the SAME on both hosts? If different, document why and how.</li>
+</ul>
+</body>
+</html>
