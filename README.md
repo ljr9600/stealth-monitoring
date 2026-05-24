@@ -1,39 +1,84 @@
-# monitoring
+# platform/monitoring/
 
-> Auto-generated stub README. Add a service description, build/run instructions, and other notes here.
+The Stealth observability stack: Prometheus + Grafana + cAdvisor + node-exporter, plus a cron-based sampler. Runs on every host (`.30`, `.50`) so you can see container metrics + host metrics + system health for the platform.
 
+This is NOT a single service — it's a multi-container compose stack co-located on each host.
 
-## External dependencies
+---
 
-> Per the [rule in `~/dev/docs/CODING_STANDARDS.md`](../../docs/CODING_STANDARDS.md#-every-service-must-document-its-external-resource-locations), every service must document where its external resources live. This section was auto-generated from a code scan on 2026-05-23 and curated.
+## Containers
 
-### Host bind-mounts (`docker-compose.yml`)
+| Container | Image | Purpose |
+|---|---|---|
+| `monitoring-prometheus` | `prom/prometheus:v2.54.1` | Time-series DB. Scrapes targets (cAdvisor, node-exporter, app `/actuator/prometheus` endpoints) every 15s. |
+| `monitoring-grafana` | `grafana/grafana:11.2.0` | Dashboards. UI at `http://<host>:3000`. Pre-provisioned with the Stealth dashboard set in `grafana/provisioning/`. |
+| `monitoring-cadvisor` | `gcr.io/cadvisor/cadvisor:v0.49.1` | Per-container CPU/RAM/network/disk metrics. Source for the "container health" panels. |
+| `monitoring-node-exporter` | `prom/node-exporter:v1.8.2` | Host-level metrics (CPU, RAM, disk, network). |
 
-| Host path | Container path | Flag | Purpose |
-|---|---|---|---|
-| `/var/run` | `/var/run` | `ro` |  |
-| `/sys` | `/sys` | `ro` |  |
-| `/var/lib/docker/` | `/var/lib/docker` | `ro` |  |
-| `/dev/disk/` | `/dev/disk` | `ro` |  |
-| `/etc/localtime` | `/etc/localtime` | `ro` | Timezone consistency (read-only) |
-| `/etc/localtime` | `/etc/localtime` | `ro` | Timezone consistency (read-only) |
-| `/etc/localtime` | `/etc/localtime` | `ro` | Timezone consistency (read-only) |
-| `/etc/localtime` | `/etc/localtime` | `ro` | Timezone consistency (read-only) |
+Plus a host-side cron-driven script:
 
-### External HTTP APIs (third-party)
+- **`cron-sampler.sh`** — runs every minute via crontab. Captures `docker stats` + key health endpoints + writes JSONL to `~/monitoring-logs/` for ad-hoc post-mortems. Not a Prometheus replacement — a complementary cheap-log capture.
 
-- **github.com** — 1 reference(s) in code
-- **grafana.com** — 1 reference(s) in code
+## Run
 
-### Environment variables relevant to external resources
+```bash
+cd ~/dev/platform/monitoring
+docker compose up -d
+```
 
-- `HOST`
-- `MONITORING_LOG_DIR`
+- **Grafana UI:** `http://<host-ip>:3000` (default login: admin / admin → prompted to change).
+- **Prometheus UI:** `http://<host-ip>:9090` (no auth; LAN-only).
 
-### Backup story
+## Cron-sampler install
 
-- **TODO** — fill in: which of the above resources is critical, what backs each one up, how to recover. (Auto-generated section; please complete with service-specific detail.)
+The cron-sampler is run via a crontab line on `.30` + `.50`:
 
-### Per-host differences (`.30` dev vs `.50` prod)
+```cron
+* * * * * /home/lloyd/dev/platform/monitoring/cron-sampler.sh >> /home/lloyd/monitoring-logs/cron.err 2>&1
+```
 
-- **TODO** — fill in: are the bind-mount paths / DB hosts / external endpoints the SAME on both hosts? If different, document why and how.
+(`.35` does not have the cron-sampler — see `docs/INFRASTRUCTURE.md` for why.)
+
+## What's pre-provisioned
+
+- **Prometheus scrape targets** — auto-configured for all `stealth-*` containers exposing `/actuator/prometheus` (Spring Boot Java services).
+- **Grafana dashboards** — under `grafana/provisioning/dashboards/`:
+  - "Container Health" — per-container CPU/RAM/restart counts
+  - "Host Health" — OS-level (CPU, RAM, disk %, network)
+  - "JVM" — Java services' GC + heap
+  - "Service Endpoints" — per-service `/actuator/health` status
+- **Grafana datasource** — Prometheus, pointed at local `:9090`.
+
+## Bind-mounts (host paths)
+
+| Host | Container | Why |
+|---|---|---|
+| `/var/run/` | `/var/run:ro` | cAdvisor reads Docker daemon socket |
+| `/sys/` | `/sys:ro` | cAdvisor reads cgroups |
+| `/var/lib/docker/` | `/var/lib/docker:ro` | cAdvisor reads container layer metadata |
+| `/dev/disk/` | `/dev/disk:ro` | node-exporter for disk stats |
+| `prometheus-data` (named volume) | `/prometheus` | Time-series retention (default 15d) |
+| `grafana-data` (named volume) | `/var/lib/grafana` | Dashboards + users |
+
+## Env vars
+
+| Var | Purpose |
+|---|---|
+| `MONITORING_LOG_DIR` | Where cron-sampler writes (`~/monitoring-logs/` by default) |
+| `GF_SECURITY_ADMIN_USER` / `GF_SECURITY_ADMIN_PASSWORD` | Override Grafana default admin (optional) |
+
+## Per-host differences
+
+- `.30` and `.50` BOTH run the full monitoring stack — they're independent. You can compare DEV vs PROD by opening Grafana on each host.
+- `.35` does not run monitoring (it's the data-tier host; the data-tier mongo/elastic emit their own metrics consumed by `.30`/`.50`'s Prometheus).
+- `.25` does not run monitoring (low-overhead RAM cache host).
+
+## Backup story
+
+The TSDB (`prometheus-data`) and the Grafana DB (`grafana-data`) are local volumes — **lost** if the host disk dies. That's accepted: metrics are short-lived observability data, not canonical state. If `.30` or `.50`'s monitoring volume is lost, the dashboards re-provision automatically on restart; you'll just have a gap in the historical metrics.
+
+## See also
+
+- `docs/OBSERVABILITY.md` — the 4-layer observability model (logs/metrics/dashboards/alerts) + runbooks ("service slow", "service down", "find log line")
+- `docs/LOGGING.md` — where each service writes logs (the OTHER pillar of observability)
+- `docs/INFRASTRUCTURE.md` § Monitoring stack — host placement
