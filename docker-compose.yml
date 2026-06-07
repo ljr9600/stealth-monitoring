@@ -14,6 +14,7 @@ services:
   cadvisor:
     image: gcr.io/cadvisor/cadvisor:v0.49.1
     container_name: monitoring-cadvisor
+    init: true   # tini reaps orphaned HEALTHCHECK wget children (no zombie buildup)
     restart: unless-stopped
     network_mode: host
     privileged: true
