@@ -18,6 +18,11 @@ services:
     restart: unless-stopped
     network_mode: host
     privileged: true
+    # Image's default healthcheck probes :8080, but we override the port to
+    # :8189 (below). On host networking :8080 is another service → 404. Point
+    # the probe at the real port so health reflects cAdvisor, not a neighbour.
+    environment:
+      - CADVISOR_HEALTHCHECK_URL=http://localhost:8189/healthz
     command:
       - '--port=8189'
       # 15s housekeeping (vs 1s default) cuts cAdvisor CPU roughly 5x —
