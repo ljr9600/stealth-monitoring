@@ -69,6 +69,7 @@ hr { border: 0; border-top: 1px solid var(--border); margin: 2em 0; }
 <tr>
 <th>Container</th>
 <th>Image</th>
+<th>Port</th>
 <th>Purpose</th>
 </tr>
 </thead>
@@ -76,21 +77,25 @@ hr { border: 0; border-top: 1px solid var(--border); margin: 2em 0; }
 <tr>
 <td><code>monitoring-prometheus</code></td>
 <td><code>prom/prometheus:v2.54.1</code></td>
-<td>Time-series DB. Scrapes targets (cAdvisor, node-exporter, app <code>/actuator/prometheus</code> endpoints) every 15s.</td>
+<td><code>9090</code></td>
+<td>Time-series DB. Scrapes targets (cAdvisor, node-exporter, app <code>/actuator/prometheus</code> endpoints) every 60s; 30-day retention. <strong>Runs on <code>.30</code> only</strong> (see "Per-host differences").</td>
 </tr>
 <tr>
 <td><code>monitoring-grafana</code></td>
 <td><code>grafana/grafana:11.2.0</code></td>
+<td><code>3000</code></td>
 <td>Dashboards. UI at <code>http://&lt;host&gt;:3000</code>. Pre-provisioned with the Stealth dashboard set in <code>grafana/provisioning/</code>.</td>
 </tr>
 <tr>
 <td><code>monitoring-cadvisor</code></td>
 <td><code>gcr.io/cadvisor/cadvisor:v0.49.1</code></td>
-<td>Per-container CPU/RAM/network/disk metrics. Source for the "container health" panels.</td>
+<td><code>8189</code></td>
+<td>Per-container CPU/RAM/network/disk metrics. Source for the "container health" panels. (Port overridden from the image default <code>8080</code> to <code>8189</code> to avoid host-network collisions.)</td>
 </tr>
 <tr>
 <td><code>monitoring-node-exporter</code></td>
 <td><code>prom/node-exporter:v1.8.2</code></td>
+<td><code>9100</code></td>
 <td>Host-level metrics (CPU, RAM, disk, network).</td>
 </tr>
 </tbody>
@@ -114,7 +119,7 @@ docker compose up -d
 <p>(<code>.35</code> does not have the cron-sampler — see <code>docs/INFRASTRUCTURE.md</code> for why.)</p>
 <h2 id="whats-pre-provisioned">What's pre-provisioned</h2>
 <ul>
-<li><strong>Prometheus scrape targets</strong> — auto-configured for all <code>stealth-*</code> containers exposing <code>/actuator/prometheus</code> (Spring Boot Java services).</li>
+<li><strong>Prometheus scrape targets</strong> (<code>prometheus/prometheus.yml</code>) — three jobs, all on <code>localhost</code> (host networking): <code>cadvisor</code> (<code>:8189</code>), <code>node-exporter</code> (<code>:9100</code>), and <code>prometheus</code> (<code>:9090</code>) itself. There are currently <strong>no per-app <code>/actuator/prometheus</code> scrape jobs</strong> in this config; container + host metrics come from cAdvisor/node-exporter. Add an app job here if you want JVM/app metrics scraped.</li>
 <li><strong>Grafana dashboards</strong> — under <code>grafana/provisioning/dashboards/</code>:</li>
 <li>"Container Health" — per-container CPU/RAM/restart counts</li>
 <li>"Host Health" — OS-level (CPU, RAM, disk %, network)</li>
@@ -155,7 +160,7 @@ docker compose up -d
 <tr>
 <td><code>prometheus-data</code> (named volume)</td>
 <td><code>/prometheus</code></td>
-<td>Time-series retention (default 15d)</td>
+<td>Time-series retention (30d, <code>--storage.tsdb.retention.time=30d</code>)</td>
 </tr>
 <tr>
 <td><code>grafana-data</code> (named volume)</td>
@@ -185,9 +190,9 @@ docker compose up -d
 </table>
 <h2 id="per-host-differences">Per-host differences</h2>
 <ul>
-<li><code>.30</code> and <code>.50</code> BOTH run the full monitoring stack — they're independent. You can compare DEV vs PROD by opening Grafana on each host.</li>
-<li><code>.35</code> does not run monitoring (it's the data-tier host; the data-tier mongo/elastic emit their own metrics consumed by <code>.30</code>/<code>.50</code>'s Prometheus).</li>
-<li><code>.25</code> does not run monitoring (low-overhead RAM cache host).</li>
+<li><strong>Prometheus + Grafana run on <code>.30</code> only</strong> (the central observability host, per <code>docs/INFRASTRUCTURE.md</code> ground-truth). <code>.30:9090</code> (Prometheus) and <code>.30:3000</code> (Grafana) are the canonical dashboards.</li>
+<li>cAdvisor (<code>:8189</code>) + node-exporter (<code>:9100</code>) are lightweight per-host exporters and may run on other app hosts so their metrics can be scraped, but the scrape config in this repo (<code>prometheus/prometheus.yml</code>) currently targets only <code>localhost</code> — i.e. the Prometheus on <code>.30</code> scrapes <code>.30</code>'s own exporters. To collect <code>.50</code> metrics centrally, add <code>.50</code> targets to <code>prometheus.yml</code>.</li>
+<li><code>.35</code> (data-tier host) and <code>.25</code> (RAM-cache host) do not run the monitoring stack.</li>
 </ul>
 <h2 id="backup-story">Backup story</h2>
 <p>The TSDB (<code>prometheus-data</code>) and the Grafana DB (<code>grafana-data</code>) are local volumes — <strong>lost</strong> if the host disk dies. That's accepted: metrics are short-lived observability data, not canonical state. If <code>.30</code> or <code>.50</code>'s monitoring volume is lost, the dashboards re-provision automatically on restart; you'll just have a gap in the historical metrics.</p>

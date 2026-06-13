@@ -8,12 +8,12 @@ This is NOT a single service — it's a multi-container compose stack co-located
 
 ## Containers
 
-| Container | Image | Purpose |
-|---|---|---|
-| `monitoring-prometheus` | `prom/prometheus:v2.54.1` | Time-series DB. Scrapes targets (cAdvisor, node-exporter, app `/actuator/prometheus` endpoints) every 15s. |
-| `monitoring-grafana` | `grafana/grafana:11.2.0` | Dashboards. UI at `http://<host>:3000`. Pre-provisioned with the Stealth dashboard set in `grafana/provisioning/`. |
-| `monitoring-cadvisor` | `gcr.io/cadvisor/cadvisor:v0.49.1` | Per-container CPU/RAM/network/disk metrics. Source for the "container health" panels. |
-| `monitoring-node-exporter` | `prom/node-exporter:v1.8.2` | Host-level metrics (CPU, RAM, disk, network). |
+| Container | Image | Port | Purpose |
+|---|---|---|---|
+| `monitoring-prometheus` | `prom/prometheus:v2.54.1` | `9090` | Time-series DB. Scrapes targets (cAdvisor, node-exporter, app `/actuator/prometheus` endpoints) every 60s; 30-day retention. **Runs on `.30` only** (see "Per-host differences"). |
+| `monitoring-grafana` | `grafana/grafana:11.2.0` | `3000` | Dashboards. UI at `http://<host>:3000`. Pre-provisioned with the Stealth dashboard set in `grafana/provisioning/`. |
+| `monitoring-cadvisor` | `gcr.io/cadvisor/cadvisor:v0.49.1` | `8189` | Per-container CPU/RAM/network/disk metrics. Source for the "container health" panels. (Port overridden from the image default `8080` to `8189` to avoid host-network collisions.) |
+| `monitoring-node-exporter` | `prom/node-exporter:v1.8.2` | `9100` | Host-level metrics (CPU, RAM, disk, network). |
 
 Plus a host-side cron-driven script:
 
@@ -41,7 +41,7 @@ The cron-sampler is run via a crontab line on `.30` + `.50`:
 
 ## What's pre-provisioned
 
-- **Prometheus scrape targets** — auto-configured for all `stealth-*` containers exposing `/actuator/prometheus` (Spring Boot Java services).
+- **Prometheus scrape targets** (`prometheus/prometheus.yml`) — three jobs, all on `localhost` (host networking): `cadvisor` (`:8189`), `node-exporter` (`:9100`), and `prometheus` (`:9090`) itself. There are currently **no per-app `/actuator/prometheus` scrape jobs** in this config; container + host metrics come from cAdvisor/node-exporter. Add an app job here if you want JVM/app metrics scraped.
 - **Grafana dashboards** — under `grafana/provisioning/dashboards/`:
   - "Container Health" — per-container CPU/RAM/restart counts
   - "Host Health" — OS-level (CPU, RAM, disk %, network)
@@ -57,7 +57,7 @@ The cron-sampler is run via a crontab line on `.30` + `.50`:
 | `/sys/` | `/sys:ro` | cAdvisor reads cgroups |
 | `/var/lib/docker/` | `/var/lib/docker:ro` | cAdvisor reads container layer metadata |
 | `/dev/disk/` | `/dev/disk:ro` | node-exporter for disk stats |
-| `prometheus-data` (named volume) | `/prometheus` | Time-series retention (default 15d) |
+| `prometheus-data` (named volume) | `/prometheus` | Time-series retention (30d, `--storage.tsdb.retention.time=30d`) |
 | `grafana-data` (named volume) | `/var/lib/grafana` | Dashboards + users |
 
 ## Env vars
@@ -69,9 +69,9 @@ The cron-sampler is run via a crontab line on `.30` + `.50`:
 
 ## Per-host differences
 
-- `.30` and `.50` BOTH run the full monitoring stack — they're independent. You can compare DEV vs PROD by opening Grafana on each host.
-- `.35` does not run monitoring (it's the data-tier host; the data-tier mongo/elastic emit their own metrics consumed by `.30`/`.50`'s Prometheus).
-- `.25` does not run monitoring (low-overhead RAM cache host).
+- **Prometheus + Grafana run on `.30` only** (the central observability host, per `docs/INFRASTRUCTURE.md` ground-truth). `.30:9090` (Prometheus) and `.30:3000` (Grafana) are the canonical dashboards.
+- cAdvisor (`:8189`) + node-exporter (`:9100`) are lightweight per-host exporters and may run on other app hosts so their metrics can be scraped, but the scrape config in this repo (`prometheus/prometheus.yml`) currently targets only `localhost` — i.e. the Prometheus on `.30` scrapes `.30`'s own exporters. To collect `.50` metrics centrally, add `.50` targets to `prometheus.yml`.
+- `.35` (data-tier host) and `.25` (RAM-cache host) do not run the monitoring stack.
 
 ## Backup story
 
