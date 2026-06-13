@@ -12,7 +12,7 @@ This is NOT a single service — it's a multi-container compose stack co-located
 |---|---|---|---|
 | `monitoring-prometheus` | `prom/prometheus:v2.54.1` | `9090` | Time-series DB. Scrapes targets (cAdvisor, node-exporter, app `/actuator/prometheus` endpoints) every 60s; 30-day retention. **Runs on `.30` only** (see "Per-host differences"). |
 | `monitoring-grafana` | `grafana/grafana:11.2.0` | `3000` | Dashboards. UI at `http://<host>:3000`. Pre-provisioned with the Stealth dashboard set in `grafana/provisioning/`. |
-| `monitoring-cadvisor` | `gcr.io/cadvisor/cadvisor:v0.49.1` | `8189` | Per-container CPU/RAM/network/disk metrics. Source for the "container health" panels. (Port overridden from the image default `8080` to `8189` to avoid host-network collisions.) |
+| `monitoring-cadvisor` | `gcr.io/cadvisor/cadvisor:v0.49.1` | `8189` | Per-container CPU/RAM/network/disk metrics. Source for the "container health" panels. (Port overridden from the image default `8080` to `8189` to avoid host-network collisions.) **⚠️ Currently reports `unhealthy`** — see "Known issues" below. Metrics still scrape fine; it's the Docker healthcheck status that's red. |
 | `monitoring-node-exporter` | `prom/node-exporter:v1.8.2` | `9100` | Host-level metrics (CPU, RAM, disk, network). |
 
 Plus a host-side cron-driven script:
@@ -72,6 +72,21 @@ The cron-sampler is run via a crontab line on `.30` + `.50`:
 - **Prometheus + Grafana run on `.30` only** (the central observability host, per `docs/INFRASTRUCTURE.md` ground-truth). `.30:9090` (Prometheus) and `.30:3000` (Grafana) are the canonical dashboards.
 - cAdvisor (`:8189`) + node-exporter (`:9100`) are lightweight per-host exporters and may run on other app hosts so their metrics can be scraped, but the scrape config in this repo (`prometheus/prometheus.yml`) currently targets only `localhost` — i.e. the Prometheus on `.30` scrapes `.30`'s own exporters. To collect `.50` metrics centrally, add `.50` targets to `prometheus.yml`.
 - `.35` (data-tier host) and `.25` (RAM-cache host) do not run the monitoring stack.
+
+## Known issues
+
+- **`monitoring-cadvisor` shows `unhealthy` in `docker ps`** (as of 2026-06-13).
+  The compose overrides the healthcheck URL to `http://localhost:8189/healthz`
+  (`CADVISOR_HEALTHCHECK_URL` env) because the image's baked-in probe targets the
+  default `:8080`, which under host networking hits a *different* service and
+  404s. Despite the override the container can still land in `unhealthy` — the
+  bundled healthcheck binary doesn't always honor the env var across cAdvisor
+  point releases. **Impact is cosmetic:** Prometheus still scrapes
+  `localhost:8189/metrics` successfully and the Container Health dashboard
+  populates; only the Docker-reported health badge is red. Verify the metrics
+  endpoint directly with `curl -fsS http://localhost:8189/healthz` (expect
+  `ok`) and `curl -s http://localhost:8189/metrics | head` before treating the
+  red badge as a real outage.
 
 ## Backup story
 

@@ -90,7 +90,7 @@ hr { border: 0; border-top: 1px solid var(--border); margin: 2em 0; }
 <td><code>monitoring-cadvisor</code></td>
 <td><code>gcr.io/cadvisor/cadvisor:v0.49.1</code></td>
 <td><code>8189</code></td>
-<td>Per-container CPU/RAM/network/disk metrics. Source for the "container health" panels. (Port overridden from the image default <code>8080</code> to <code>8189</code> to avoid host-network collisions.)</td>
+<td>Per-container CPU/RAM/network/disk metrics. Source for the "container health" panels. (Port overridden from the image default <code>8080</code> to <code>8189</code> to avoid host-network collisions.) <strong>⚠️ Currently reports <code>unhealthy</code></strong> — see "Known issues" below. Metrics still scrape fine; it's the Docker healthcheck status that's red.</td>
 </tr>
 <tr>
 <td><code>monitoring-node-exporter</code></td>
@@ -193,6 +193,21 @@ docker compose up -d
 <li><strong>Prometheus + Grafana run on <code>.30</code> only</strong> (the central observability host, per <code>docs/INFRASTRUCTURE.md</code> ground-truth). <code>.30:9090</code> (Prometheus) and <code>.30:3000</code> (Grafana) are the canonical dashboards.</li>
 <li>cAdvisor (<code>:8189</code>) + node-exporter (<code>:9100</code>) are lightweight per-host exporters and may run on other app hosts so their metrics can be scraped, but the scrape config in this repo (<code>prometheus/prometheus.yml</code>) currently targets only <code>localhost</code> — i.e. the Prometheus on <code>.30</code> scrapes <code>.30</code>'s own exporters. To collect <code>.50</code> metrics centrally, add <code>.50</code> targets to <code>prometheus.yml</code>.</li>
 <li><code>.35</code> (data-tier host) and <code>.25</code> (RAM-cache host) do not run the monitoring stack.</li>
+</ul>
+<h2 id="known-issues">Known issues</h2>
+<ul>
+<li><strong><code>monitoring-cadvisor</code> shows <code>unhealthy</code> in <code>docker ps</code></strong> (as of 2026-06-13).
+  The compose overrides the healthcheck URL to <code>http://localhost:8189/healthz</code>
+  (<code>CADVISOR_HEALTHCHECK_URL</code> env) because the image's baked-in probe targets the
+  default <code>:8080</code>, which under host networking hits a <em>different</em> service and
+  404s. Despite the override the container can still land in <code>unhealthy</code> — the
+  bundled healthcheck binary doesn't always honor the env var across cAdvisor
+  point releases. <strong>Impact is cosmetic:</strong> Prometheus still scrapes
+  <code>localhost:8189/metrics</code> successfully and the Container Health dashboard
+  populates; only the Docker-reported health badge is red. Verify the metrics
+  endpoint directly with <code>curl -fsS http://localhost:8189/healthz</code> (expect
+  <code>ok</code>) and <code>curl -s http://localhost:8189/metrics | head</code> before treating the
+  red badge as a real outage.</li>
 </ul>
 <h2 id="backup-story">Backup story</h2>
 <p>The TSDB (<code>prometheus-data</code>) and the Grafana DB (<code>grafana-data</code>) are local volumes — <strong>lost</strong> if the host disk dies. That's accepted: metrics are short-lived observability data, not canonical state. If <code>.30</code> or <code>.50</code>'s monitoring volume is lost, the dashboards re-provision automatically on restart; you'll just have a gap in the historical metrics.</p>
