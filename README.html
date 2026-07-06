@@ -78,13 +78,13 @@ hr { border: 0; border-top: 1px solid var(--border); margin: 2em 0; }
 <td><code>monitoring-prometheus</code></td>
 <td><code>prom/prometheus:v2.54.1</code></td>
 <td><code>9090</code></td>
-<td>Time-series DB. Scrapes targets (cAdvisor, node-exporter, app <code>/actuator/prometheus</code> endpoints) every 60s; 30-day retention. <strong>Runs on <code>.30</code> only</strong> (see "Per-host differences").</td>
+<td>Time-series DB. Scrapes cAdvisor (<code>:8189</code>), node-exporter (<code>:9100</code>) and itself (<code>:9090</code>) every 60s; 30-day retention. No app <code>/actuator</code> jobs are configured (see "What's pre-provisioned"). Deployed on both <code>.30</code> and <code>.50</code> (see "Per-host differences"). <strong>⚠️ <code>.50</code>'s instance has been down since 2026-05-31</strong> — see "Known issues".</td>
 </tr>
 <tr>
 <td><code>monitoring-grafana</code></td>
 <td><code>grafana/grafana:11.2.0</code></td>
 <td><code>3000</code></td>
-<td>Dashboards. UI at <code>http://&lt;host&gt;:3000</code>. Pre-provisioned with the Stealth dashboard set in <code>grafana/provisioning/</code>.</td>
+<td>Dashboards. UI at <code>http://&lt;host&gt;:3000</code>. Pre-provisioned with the dashboards in <code>grafana/dashboards/</code> (provider + datasource configs in <code>grafana/provisioning/</code>).</td>
 </tr>
 <tr>
 <td><code>monitoring-cadvisor</code></td>
@@ -102,7 +102,7 @@ hr { border: 0; border-top: 1px solid var(--border); margin: 2em 0; }
 </table>
 <p>Plus a host-side cron-driven script:</p>
 <ul>
-<li><strong><code>cron-sampler.sh</code></strong> — runs every minute via crontab. Captures <code>docker stats</code> + key health endpoints + writes JSONL to <code>~/monitoring-logs/</code> for ad-hoc post-mortems. Not a Prometheus replacement — a complementary cheap-log capture.</li>
+<li><strong><code>cron-sampler.sh</code></strong> — runs every minute via crontab. Samples <code>docker stats</code> (per-container CPU/mem) and host memory/swap/disk/load into two dated CSVs under <code>~/monitoring-logs/</code> (<code>containers-YYYY-MM-DD.csv</code>, <code>host-YYYY-MM-DD.csv</code>); CSVs older than 30 days are auto-deleted. It captures no health endpoints — just <code>docker stats</code>, <code>free</code>, <code>df</code>, and <code>/proc/loadavg</code>. Independent of Prometheus — it reads <code>docker stats</code> directly, so it's the fallback trail if the TSDB is lost. Env: <code>MONITORING_LOG_DIR</code> overrides the output dir (default <code>~/monitoring-logs</code>).</li>
 </ul>
 <h2 id="run">Run</h2>
 <pre><code class="language-bash">cd ~/dev/platform/monitoring
@@ -112,19 +112,19 @@ docker compose up -d
 <li><strong>Grafana UI:</strong> <code>http://&lt;host-ip&gt;:3000</code> (default login: admin / admin → prompted to change).</li>
 <li><strong>Prometheus UI:</strong> <code>http://&lt;host-ip&gt;:9090</code> (no auth; LAN-only).</li>
 </ul>
+<p><strong>⚠️ Always deploy from <code>~/dev/platform/monitoring</code>.</strong> The compose project name is <code>monitoring</code> (directory basename), so the <code>prometheus-data</code> / <code>grafana-data</code> volumes survive redeploys from this path. Containers created from the retired pre-reorg path (<code>~/dev/monitoring</code>) must be removed and recreated from here — a stale pre-reorg deployment is exactly what broke prod <code>.50</code> (see "Known issues").</p>
 <h2 id="cron-sampler-install">Cron-sampler install</h2>
 <p>The cron-sampler is run via a crontab line on <code>.30</code> + <code>.50</code>:</p>
 <pre><code class="language-cron">* * * * * /home/lloyd/dev/platform/monitoring/cron-sampler.sh &gt;&gt; /home/lloyd/monitoring-logs/cron.err 2&gt;&amp;1
 </code></pre>
+<p><strong>⚠️ Verify the crontab points at <code>~/dev/platform/monitoring/...</code></strong> — the pre-reorg <code>~/dev/monitoring/</code> path is dead. Both hosts' crontabs still had the old path as of 2026-07, so the sampler silently wrote nothing after 2026-05-22 (check with <code>crontab -l | grep cron-sampler</code> and <code>ls -lt ~/monitoring-logs/ | head</code>).</p>
 <p>(<code>.35</code> does not have the cron-sampler — see <code>docs/INFRASTRUCTURE.md</code> for why.)</p>
 <h2 id="whats-pre-provisioned">What's pre-provisioned</h2>
 <ul>
 <li><strong>Prometheus scrape targets</strong> (<code>prometheus/prometheus.yml</code>) — three jobs, all on <code>localhost</code> (host networking): <code>cadvisor</code> (<code>:8189</code>), <code>node-exporter</code> (<code>:9100</code>), and <code>prometheus</code> (<code>:9090</code>) itself. There are currently <strong>no per-app <code>/actuator/prometheus</code> scrape jobs</strong> in this config; container + host metrics come from cAdvisor/node-exporter. Add an app job here if you want JVM/app metrics scraped.</li>
-<li><strong>Grafana dashboards</strong> — under <code>grafana/provisioning/dashboards/</code>:</li>
-<li>"Container Health" — per-container CPU/RAM/restart counts</li>
-<li>"Host Health" — OS-level (CPU, RAM, disk %, network)</li>
-<li>"JVM" — Java services' GC + heap</li>
-<li>"Service Endpoints" — per-service <code>/actuator/health</code> status</li>
+<li><strong>Grafana dashboards</strong> — the JSONs live in <code>grafana/dashboards/</code> (bind-mounted to <code>/dashboards</code> in the container); <code>grafana/provisioning/dashboards/</code> holds only the provider config (<code>dashboards.yml</code>) that tells Grafana to load them. Exactly two dashboards ship in this repo:</li>
+<li><strong>"Cadvisor exporter"</strong> (<code>grafana/dashboards/cadvisor-exporter.json</code>) — per-container CPU/memory/network/filesystem</li>
+<li><strong>"Node Exporter Full"</strong> (<code>grafana/dashboards/node-exporter-full.json</code>) — host CPU, RAM, disk, network</li>
 <li><strong>Grafana datasource</strong> — Prometheus, pointed at local <code>:9090</code>.</li>
 </ul>
 <h2 id="bind-mounts-host-paths">Bind-mounts (host paths)</h2>
@@ -155,7 +155,17 @@ docker compose up -d
 <tr>
 <td><code>/dev/disk/</code></td>
 <td><code>/dev/disk:ro</code></td>
-<td>node-exporter for disk stats</td>
+<td>cAdvisor disk metadata</td>
+</tr>
+<tr>
+<td><code>/</code></td>
+<td><code>/rootfs:ro</code></td>
+<td>cAdvisor reads host root filesystem</td>
+</tr>
+<tr>
+<td><code>/</code></td>
+<td><code>/host:ro,rslave</code></td>
+<td>node-exporter host filesystem metrics (<code>--path.rootfs=/host</code>)</td>
 </tr>
 <tr>
 <td><code>prometheus-data</code> (named volume)</td>
@@ -186,28 +196,75 @@ docker compose up -d
 <td><code>GF_SECURITY_ADMIN_USER</code> / <code>GF_SECURITY_ADMIN_PASSWORD</code></td>
 <td>Override Grafana default admin (optional)</td>
 </tr>
+<tr>
+<td><code>GF_SERVER_HTTP_PORT</code></td>
+<td><code>3000</code> — Grafana listen port (set in compose)</td>
+</tr>
+<tr>
+<td><code>GF_USERS_ALLOW_SIGN_UP</code></td>
+<td><code>false</code> — disable Grafana self-signup (set in compose)</td>
+</tr>
+<tr>
+<td><code>CADVISOR_HEALTHCHECK_URL</code></td>
+<td><code>http://localhost:8189/healthz</code> — points the image's healthcheck at the overridden port (set in compose)</td>
+</tr>
 </tbody>
 </table>
+<h2 id="logging">Logging</h2>
+<p>All four containers log via the Docker <code>json-file</code> driver; logs are collected under <code>/var/log/containers/&lt;container-name&gt;/</code> per <code>docs/LOGGING.md</code> — no app-specific log files. The cron-sampler's own stderr goes to <code>~/monitoring-logs/cron.err</code> (see the crontab line above).</p>
 <h2 id="per-host-differences">Per-host differences</h2>
 <ul>
-<li><strong>Prometheus + Grafana run on <code>.30</code> only</strong> (the central observability host, per <code>docs/INFRASTRUCTURE.md</code> ground-truth). <code>.30:9090</code> (Prometheus) and <code>.30:3000</code> (Grafana) are the canonical dashboards.</li>
-<li>cAdvisor (<code>:8189</code>) + node-exporter (<code>:9100</code>) are lightweight per-host exporters and may run on other app hosts so their metrics can be scraped, but the scrape config in this repo (<code>prometheus/prometheus.yml</code>) currently targets only <code>localhost</code> — i.e. the Prometheus on <code>.30</code> scrapes <code>.30</code>'s own exporters. To collect <code>.50</code> metrics centrally, add <code>.50</code> targets to <code>prometheus.yml</code>.</li>
+<li><strong>The full 4-container stack is deployed on both <code>.30</code> and <code>.50</code></strong>, each scraping only its own localhost exporters — there is no central cross-host scrape. <code>.30:9090</code> (Prometheus) and <code>.30:3000</code> (Grafana) are the primary dashboards. <strong>NOTE:</strong> the <code>.50</code> deployment was created from the pre-reorg <code>~/dev/monitoring</code> path and is currently broken — see "Known issues".</li>
+<li>The scrape config in this repo (<code>prometheus/prometheus.yml</code>) targets only <code>localhost</code> — i.e. each host's Prometheus scrapes that host's own exporters. To collect <code>.50</code> metrics centrally on <code>.30</code>, add <code>.50</code> targets to <code>prometheus.yml</code>.</li>
 <li><code>.35</code> (data-tier host) and <code>.25</code> (RAM-cache host) do not run the monitoring stack.</li>
 </ul>
 <h2 id="known-issues">Known issues</h2>
 <ul>
-<li><strong><code>monitoring-cadvisor</code> shows <code>unhealthy</code> in <code>docker ps</code></strong> (as of 2026-06-13).
-  The compose overrides the healthcheck URL to <code>http://localhost:8189/healthz</code>
-  (<code>CADVISOR_HEALTHCHECK_URL</code> env) because the image's baked-in probe targets the
-  default <code>:8080</code>, which under host networking hits a <em>different</em> service and
-  404s. Despite the override the container can still land in <code>unhealthy</code> — the
-  bundled healthcheck binary doesn't always honor the env var across cAdvisor
-  point releases. <strong>Impact is cosmetic:</strong> Prometheus still scrapes
-  <code>localhost:8189/metrics</code> successfully and the Container Health dashboard
-  populates; only the Docker-reported health badge is red. Verify the metrics
-  endpoint directly with <code>curl -fsS http://localhost:8189/healthz</code> (expect
-  <code>ok</code>) and <code>curl -s http://localhost:8189/metrics | head</code> before treating the
-  red badge as a real outage.</li>
+<li><strong><code>monitoring-prometheus</code> on <code>.50</code> has been <code>Exited(127)</code> since 2026-05-31 ~15:27 ET</strong> —
+  root cause confirmed 2026-07 (this is the pre-reorg-path problem, not a config bug):
+  the <code>.50</code> stack was deployed from the pre-reorg path <code>/home/lloyd/dev/monitoring</code>
+  (visible in the container's <code>com.docker.compose.project.working_dir</code> label). After
+  the repo moved to <code>~/dev/platform/monitoring</code>, the bind-mount source
+  <code>prometheus/prometheus.yml</code> no longer existed at the old path; on the 2026-05-31
+  restart, dockerd auto-created it as a root-owned <strong>directory</strong>, and mounting a
+  directory onto the image's config <strong>file</strong> (<code>/etc/prometheus/prometheus.yml</code>)
+  fails at container init — <code>docker inspect</code> shows <code>State.Error</code> = "not a
+  directory ... Are you trying to mount a directory onto a file", exit code 127.
+  <strong>Impact:</strong> NO container/host metrics have been collected on prod <code>.50</code> since
+  2026-05-31 (nothing else covers <code>.50</code> — <code>.30</code>'s Prometheus scrapes only its own
+  localhost). <strong>Fix procedure (needs <code>.50</code> prod go-ahead, outside market hours):</strong>
+  on <code>.50</code>, remove the bogus auto-created tree <code>/home/lloyd/dev/monitoring/</code>
+  (verify first it contains only the empty dockerd-created dirs, nothing real),
+  then <code>docker compose down</code> the old-path containers and recreate the stack from
+  <code>~/dev/platform/monitoring</code> (<code>docker compose up -d</code>). The compose project name
+  is <code>monitoring</code> either way (same directory basename), so the
+  <code>monitoring_prometheus-data</code> TSDB volume is reused — history from before the
+  outage survives.</li>
+<li><strong><code>monitoring-cadvisor</code> may show <code>unhealthy</code> in <code>docker ps</code> on hosts where the
+  container predates commit <code>ce88d3a</code> (healthcheck fix)</strong> — e.g. <code>.50</code>, whose stack
+  was created from the pre-reorg <code>~/dev/monitoring</code> path. Such containers still
+  carry the image-default <code>CADVISOR_HEALTHCHECK_URL=http://localhost:8080/healthz</code>,
+  which under host networking probes a <em>different</em> service on <code>:8080</code> and 404s
+  every 30s. The env-var override in this compose <strong>works</strong> (verified: <code>.30</code>'s
+  container, recreated from the current compose, is <code>healthy</code>) — so the remedy
+  is to recreate the container from <code>~/dev/platform/monitoring</code>, not a config
+  change. <strong>Impact is cosmetic:</strong> cAdvisor itself is fine — Prometheus still
+  scrapes <code>localhost:8189/metrics</code> and <code>curl -fsS http://localhost:8189/healthz</code>
+  returns <code>ok</code>; only the Docker-reported health badge is red. On <code>.50</code> the
+  recreate falls under the prometheus fix procedure above (same redeploy, same
+  go-ahead).</li>
+<li><strong><code>monitoring-grafana</code> on <code>.50</code> runs with EMPTY provisioning</strong> — same pre-reorg
+  root cause: its bind mounts point at <code>/home/lloyd/dev/monitoring/grafana/{provisioning,dashboards}</code>,
+  which are empty dockerd-auto-created directories. Provisioning changes committed
+  to this repo never reach <code>.50</code>, and after a <code>grafana-data</code> volume loss <code>.50</code>'s
+  Grafana would come up with no datasource and no dashboards (so the "Backup
+  story" re-provisioning claim below does not hold on <code>.50</code> until it's redeployed).
+  Fixed by the same recreate-from-<code>~/dev/platform/monitoring</code> procedure.</li>
+<li><strong>cron-sampler crontabs went stale in the reorg</strong> — both <code>.30</code> and <code>.50</code> crontabs
+  still pointed at the dead <code>/home/lloyd/dev/monitoring/cron-sampler.sh</code> as of
+  2026-07, so the CSV fallback trail captured nothing after 2026-05-22 (including
+  during the <code>.50</code> Prometheus outage it was designed for). Update the crontab line
+  to the <code>~/dev/platform/monitoring/</code> path shown in "Cron-sampler install" above.</li>
 </ul>
 <h2 id="backup-story">Backup story</h2>
 <p>The TSDB (<code>prometheus-data</code>) and the Grafana DB (<code>grafana-data</code>) are local volumes — <strong>lost</strong> if the host disk dies. That's accepted: metrics are short-lived observability data, not canonical state. If <code>.30</code> or <code>.50</code>'s monitoring volume is lost, the dashboards re-provision automatically on restart; you'll just have a gap in the historical metrics.</p>
