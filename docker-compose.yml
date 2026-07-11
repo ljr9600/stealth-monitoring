@@ -51,7 +51,10 @@ services:
     pid: host
     command:
       - '--path.rootfs=/host'
-      - '--web.listen-address=:9100'
+      # Bind the host PRIMARY IP, not the wildcard (:9100). The wildcard shadows every IP on the
+      # box — including the IQFeed emulator's dedicated .33/.53 — so the emulator couldn't bind
+      # its own :9100. Set NODE_EXPORTER_LISTEN per host (.30 -> 192.168.1.30:9100, .50 -> .50).
+      - '--web.listen-address=${NODE_EXPORTER_LISTEN:-:9100}'
     volumes:
       - /:/host:ro,rslave
       - /etc/localtime:/etc/localtime:ro
