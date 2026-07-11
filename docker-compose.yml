@@ -25,6 +25,10 @@ services:
       - CADVISOR_HEALTHCHECK_URL=http://localhost:8189/healthz
     command:
       - '--port=8189'
+      # Bind loopback (not the 0.0.0.0 default) — cAdvisor is only scraped by the local
+      # Prometheus at localhost:8189, so this keeps scraping working and frees the port on the
+      # secondary IPs (.31/.32/.33). Override via CADVISOR_IP.
+      - '--listen_ip=${CADVISOR_IP:-0.0.0.0}'
       # 15s housekeeping (vs 1s default) cuts cAdvisor CPU roughly 5x —
       # 60s scrape cadence doesn't need 1s internal sampling.
       - '--housekeeping_interval=15s'
@@ -75,7 +79,9 @@ services:
       - '--config.file=/etc/prometheus/prometheus.yml'
       - '--storage.tsdb.path=/prometheus'
       - '--storage.tsdb.retention.time=30d'
-      - '--web.listen-address=:9090'
+      # Bind loopback (not 0.0.0.0) — Prometheus is reached only by the local Grafana at
+      # localhost:9090 and by admins; frees :9090 on the secondary IPs. Override via PROM_LISTEN.
+      - '--web.listen-address=${PROM_LISTEN:-:9090}'
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus-data:/prometheus
@@ -92,6 +98,10 @@ services:
     network_mode: host
     environment:
       - GF_SERVER_HTTP_PORT=3000
+      # Bind the host primary IP (not 0.0.0.0) so Grafana stays reachable on <host>:3000 while
+      # freeing :3000 on the secondary IPs. Its own datasource call to localhost:9090 is outbound
+      # and unaffected. Empty default = all interfaces (backward compat); set GRAFANA_ADDR per host.
+      - GF_SERVER_HTTP_ADDR=${GRAFANA_ADDR:-}
       - GF_USERS_ALLOW_SIGN_UP=false
     volumes:
       - grafana-data:/var/lib/grafana
