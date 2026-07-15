@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ALGORITHMS</title>
+<style>
+:root {
+  --fg: #24292f;
+  --muted: #57606a;
+  --bg: #ffffff;
+  --accent: #0969da;
+  --border: #d0d7de;
+  --code-bg: #f6f8fa;
+}
+* { box-sizing: border-box; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  color: var(--fg);
+  background: var(--bg);
+  max-width: 1100px;
+  margin: 40px auto;
+  padding: 0 24px 80px;
+  line-height: 1.55;
+}
+h1 { font-size: 2em; border-bottom: 2px solid var(--border); padding-bottom: 8px; margin-top: 1.2em; }
+h2 { font-size: 1.5em; border-bottom: 1px solid var(--border); padding-bottom: 6px; margin-top: 1.8em; }
+h3 { font-size: 1.2em; margin-top: 1.6em; }
+h4 { font-size: 1.05em; margin-top: 1.4em; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: var(--code-bg);
+  padding: 0.15em 0.4em;
+  border-radius: 4px;
+  font-size: 0.92em;
+}
+pre {
+  background: var(--code-bg);
+  padding: 16px;
+  border-radius: 6px;
+  overflow-x: auto;
+  line-height: 1.45;
+}
+pre code { background: transparent; padding: 0; font-size: 0.9em; }
+table { border-collapse: collapse; margin: 1em 0; }
+th, td { border: 1px solid var(--border); padding: 8px 12px; text-align: left; }
+th { background: var(--code-bg); font-weight: 600; }
+blockquote {
+  border-left: 4px solid var(--border);
+  margin-left: 0;
+  padding: 0 16px;
+  color: var(--muted);
+}
+hr { border: 0; border-top: 1px solid var(--border); margin: 2em 0; }
+.mermaid { background: var(--code-bg); padding: 12px; border-radius: 6px; margin: 1em 0; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({startOnLoad:true, theme:'default'});</script>
+</head>
+<body>
+<h1 id="algorithmsmd-platformmonitoring">ALGORITHMS.md — platform/monitoring</h1>
+<p>Audience: a junior engineer taking over this stack. <code>README.md</code> already covers the
+container roster, ports, bind-mounts, run/deploy steps, per-host differences, and the
+current known-issue outages — <strong>read it first, this file does not repeat it.</strong> This
+doc covers only the parts with real <em>logic</em> or <em>non-obvious design decisions</em>: the
+<code>cron-sampler.sh</code> parsing algorithm and the tuning/binding constants baked into
+<code>docker-compose.yml</code> and <code>prometheus/prometheus.yml</code>.</p>
+<p>Reality check: monitoring is 95% upstream images (Prometheus, Grafana, cAdvisor,
+node-exporter) wired together with config. The <strong>only hand-written code</strong> in the repo
+is <code>cron-sampler.sh</code>. Everything else is configuration whose <em>values were chosen
+deliberately</em> — those choices are what a junior will trip on, so they are documented
+below with the reasoning from the code comments.</p>
+<hr />
+<h2 id="1-cron-samplersh-the-csv-fallback-trail">1. cron-sampler.sh — the CSV fallback trail</h2>
+<p><strong>What it does (one line):</strong> every minute, cron runs this script to append one row
+per running container (CPU%, memory) and one host row (RAM/swap/disk/load) to dated
+CSVs under <code>~/monitoring-logs/</code>, independent of Prometheus.
+Lives in <code>cron-sampler.sh</code> (whole file, 64 lines).</p>
+<h3 id="why-it-exists-design-rationale">Why it exists (design rationale)</h3>
+<p>It reads <code>docker stats</code> <strong>directly</strong>, not Prometheus (<code>cron-sampler.sh:11-12</code>). So if
+the Prometheus TSDB or its volume is ever lost — exactly the <code>.50</code> outage the README
+documents — this plain-text trail still has the CPU/mem/disk trend. The two systems
+are deliberately independent so they can't fail together. The tradeoff: it's coarse
+(1-minute <code>docker stats</code> snapshots, no per-metric time series, no querying beyond
+<code>awk</code>), which is fine for a <em>fallback</em>.</p>
+<h3 id="step-by-step">Step-by-step</h3>
+<ol>
+<li><strong>PATH hardening</strong> (<code>:19-20</code>). cron runs with a minimal <code>PATH</code>, so the script
+   explicitly sets <code>PATH=/usr/local/bin:/usr/bin:/bin</code> or <code>docker</code>/<code>free</code>/<code>df</code> won't
+   be found. This is the #1 reason a cron script "works in my shell but writes nothing
+   from cron" — a junior gotcha.</li>
+<li><strong>Paths &amp; headers</strong> (<code>:22-31</code>). <code>LOG_DIR</code> = <code>$MONITORING_LOG_DIR</code> or <code>~/monitoring-logs</code>.
+   Files are dated: <code>containers-YYYY-MM-DD.csv</code>, <code>host-YYYY-MM-DD.csv</code>. The header line
+   is written only if the file doesn't already exist (<code>[ -f "$CONT" ] ||</code>), so the
+   first run of each day creates the file with a header and every later run in that day
+   just appends rows.</li>
+<li><strong>Per-container sampling</strong> (<code>:47-53</code>). <code>docker stats --no-stream --format
+   '{{.Name}}|{{.CPUPerc}}|{{.MemUsage}}|{{.MemPerc}}'</code> gives one pipe-delimited line
+   per container. <code>--no-stream</code> = take one snapshot and exit (otherwise it streams
+   forever and cron would hang). The <code>MemUsage</code> field looks like <code>"9.92GiB / 14GiB"</code>;
+   the script splits it with bash parameter expansion:
+   - <code>used=${mem%% / *}</code> → strips the longest <code>/ *</code> suffix → <code>"9.92GiB"</code>
+   - <code>lim=${mem##* / }</code> → strips the longest <code>* /</code> prefix → <code>"14GiB"</code>
+   Percent tokens have their trailing <code>%</code> stripped (<code>${cpu%\%}</code>, <code>${memp%\%}</code>) so the
+   CSV holds bare numbers.</li>
+<li><strong>Unit normalization — <code>to_mib()</code></strong> (<code>:34-44</code>). This is the one real algorithm.
+   <code>docker stats</code> emits human units (<code>9.92GiB</code>, <code>512MiB</code>, <code>0B</code>) that you can't compare
+   numerically. <code>to_mib</code> splits a token into number + unit with awk and converts
+   everything to <strong>MiB</strong>:
+   - <code>GiB</code>/<code>GB</code> → <code>× 1024</code>
+   - <code>MiB</code>/<code>MB</code> → <code>× 1</code> (unchanged, this is the base unit)
+   - <code>KiB</code>/<code>kB</code> → <code>÷ 1024</code>
+   - <code>B</code> or no unit → <code>÷ 1048576</code>
+   - anything else → passed through unchanged (defensive fallback)
+   Gotcha: it treats <code>GiB</code> and <code>GB</code> (and <code>MiB</code>/<code>MB</code>, etc.) as <strong>identical</strong> — a
+   deliberate simplification, since Docker's ~2.4% GiB-vs-GB discrepancy is noise for a
+   trend log. Don't "fix" this expecting exact bytes.</li>
+<li><strong>Host sampling</strong> (<code>:56-60</code>). <code>free -m</code> → total/used/available RAM (<code>$2 $3 $7</code> of the
+   <code>Mem:</code> line) and swap used; <code>df -BG --output=pcent,avail /</code> → root-disk used-% and
+   available GiB; <code>/proc/loadavg</code> field 1 → 1-minute load average. All appended as one
+   host row.</li>
+<li><strong>Retention</strong> (<code>:63</code>). <code>find "$LOG_DIR" -name '*.csv' -mtime +30 -delete</code> prunes CSVs
+   older than <strong>30 days</strong>. This mirrors Prometheus's 30-day TSDB retention so the two
+   trails cover the same window. <code>|| true</code> keeps a failed prune from failing the script.</li>
+</ol>
+<h3 id="edge-cases-gotchas">Edge cases / gotchas</h3>
+<ul>
+<li><code>set -uo pipefail</code> (<code>:18</code>) — <strong>no <code>-e</code>.</strong> A single failing command won't abort the
+  run, intentional so a transient <code>docker stats</code> hiccup still lets the host row write.</li>
+<li><code>docker stats … 2&gt;/dev/null</code> (<code>:47</code>) swallows errors; if the Docker socket is down
+  you silently get a host row but no container rows for that minute.</li>
+<li>The install is a <strong>crontab line, not managed by compose</strong> (see README "Cron-sampler
+  install"). The README documents that both <code>.30</code> and <code>.50</code> crontabs pointed at the
+  dead pre-reorg path <code>~/dev/monitoring/cron-sampler.sh</code> and wrote nothing after
+  2026-05-22 — always verify <code>crontab -l | grep cron-sampler</code> points at
+  <code>~/dev/platform/monitoring/</code>.</li>
+</ul>
+<hr />
+<h2 id="2-prometheus-scrape-config-why-60s-why-localhost-only">2. Prometheus scrape config — why 60s, why localhost-only</h2>
+<p><strong>Where:</strong> <code>prometheus/prometheus.yml</code>.</p>
+<ul>
+<li><strong><code>scrape_interval: 60s</code> / <code>evaluation_interval: 60s</code></strong> (<code>:6-7</code>). Chosen to match the
+  1-minute sampling cadence the container CPU/mem/disk trend was specced at. This value
+  is load-bearing for the cAdvisor tuning in §3 — the internal housekeeping interval was
+  set assuming a 60s scrape, so if you drop this to 15s you must also revisit
+  <code>--housekeeping_interval</code>.</li>
+<li><strong>Three jobs, all <code>localhost</code></strong> (<code>:11-23</code>): <code>cadvisor</code> (<code>localhost:8189</code>),
+  <code>node-exporter</code> (<code>localhost:9100</code>), <code>prometheus</code> (<code>localhost:9090</code> — self-scrape for
+  Prometheus's own health). Because every container uses <strong>host networking</strong>, the
+  exporters are reachable at plain <code>localhost:&lt;port&gt;</code> with no service discovery.</li>
+<li><strong>Design consequence — no cross-host scrape.</strong> Each host's Prometheus scrapes only
+  <em>its own</em> localhost exporters. There is no central aggregation: <code>.30</code> cannot see <code>.50</code>.
+  To centralize, add <code>.50</code> targets here (README "Per-host differences" says the same).</li>
+<li><strong>No app <code>/actuator/prometheus</code> jobs.</strong> Only container (cAdvisor) + host
+  (node-exporter) metrics are collected; JVM/app metrics are <em>not</em> scraped by default.
+  Add a job here to change that.</li>
+</ul>
+<hr />
+<h2 id="3-docker-composeyml-the-tuning-constants-and-why-theyre-set">3. docker-compose.yml — the tuning constants and why they're set</h2>
+<p>These are the non-obvious knobs. Each was set to solve a specific problem; changing one
+blindly re-introduces the bug it fixed.</p>
+<table>
+<thead>
+<tr>
+<th>Setting (file:line)</th>
+<th>Value</th>
+<th>Why</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>cAdvisor <code>--housekeeping_interval</code> (<code>:33</code>)</td>
+<td><code>15s</code> (vs <code>1s</code> default)</td>
+<td>Cuts cAdvisor CPU <strong>~5x</strong>. The 60s scrape cadence (§2) never needs 1s internal sampling, so the default was pure waste.</td>
+</tr>
+<tr>
+<td>cAdvisor <code>--port</code> (<code>:27</code>)</td>
+<td><code>8189</code> (vs image default <code>8080</code>)</td>
+<td><code>:8080</code> collides with other services under host networking. <strong>This is also why <code>CADVISOR_HEALTHCHECK_URL</code> (<code>:25</code>) must be overridden</strong> to <code>http://localhost:8189/healthz</code> — the image's built-in healthcheck hard-codes <code>:8080</code>, so without the override the health probe hits a <em>neighboring</em> service on <code>:8080</code>, 404s, and marks cAdvisor <code>unhealthy</code> even though it's fine (this is the exact cosmetic-unhealthy bug the README documents on <code>.50</code>).</td>
+</tr>
+<tr>
+<td>cAdvisor <code>--docker_only=true</code> (<code>:35</code>)</td>
+<td>on</td>
+<td>Ignore non-Docker cgroups; less noise, less CPU.</td>
+</tr>
+<tr>
+<td>cAdvisor <code>init: true</code> (<code>:17</code>)</td>
+<td>tini</td>
+<td>tini reaps the orphaned <code>wget</code> children the HEALTHCHECK spawns every 30s, preventing zombie-process buildup.</td>
+</tr>
+<tr>
+<td>cAdvisor <code>--listen_ip</code> (<code>:31</code>)</td>
+<td><code>${CADVISOR_IP:-0.0.0.0}</code>, <code>.env</code> sets <code>127.0.0.1</code></td>
+<td>Bind loopback so the exporter doesn't occupy <code>:8189</code> on the box's <strong>secondary IPs</strong> (<code>.31/.32/.33</code>). Local Prometheus still scrapes it via loopback.</td>
+</tr>
+<tr>
+<td>node-exporter <code>--web.listen-address</code> (<code>:61</code>)</td>
+<td><code>${NODE_EXPORTER_LISTEN:-:9100}</code>, <code>.env</code> sets <code>127.0.0.1:9100</code></td>
+<td><strong>The wildcard <code>:9100</code> shadows every IP on the host</strong> — including the IQFeed emulator's dedicated <code>.33/.53</code>, which then can't bind its <em>own</em> <code>:9100</code>. Binding a single address frees the port on the other IPs.</td>
+</tr>
+<tr>
+<td>Prometheus <code>--web.listen-address</code> (<code>:84</code>)</td>
+<td><code>${PROM_LISTEN:-:9090}</code>, <code>.env</code> sets <code>127.0.0.1:9090</code></td>
+<td>Same secondary-IP-freeing rationale; Prometheus is only reached by local Grafana + admins.</td>
+</tr>
+<tr>
+<td>Prometheus <code>user: root</code> (<code>:77</code>)</td>
+<td>root</td>
+<td>So it can write the TSDB into the named volume without a first-run permission-denied crash loop.</td>
+</tr>
+<tr>
+<td>Prometheus <code>--storage.tsdb.retention.time</code> (<code>:81</code>)</td>
+<td><code>30d</code></td>
+<td>Matches the cron-sampler's 30-day CSV retention (§1.6).</td>
+</tr>
+<tr>
+<td>Grafana <code>GF_SERVER_HTTP_ADDR</code> (<code>:104</code>)</td>
+<td><code>${GRAFANA_ADDR:-}</code>, <code>.env</code> sets <code>192.168.1.30</code></td>
+<td>Bind the host primary IP so Grafana stays reachable on <code>&lt;host&gt;:3000</code> while freeing <code>:3000</code> on secondary IPs. Empty default = all interfaces (backward compat).</td>
+</tr>
+<tr>
+<td>memory limits</td>
+<td>cadvisor 512M, node-exporter 128M, prometheus 1G, grafana 512M (<code>:45-48,66-68,89-92,111-114</code>)</td>
+<td>Per-container caps so an observability leak can't starve the monitored host.</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Key cross-cutting decision — everything uses <code>network_mode: host</code></strong> (compose header
+comment, <code>:10-12</code>). Every monitored service already uses host networking, and it lets
+Prometheus reach the exporters at plain <code>localhost:&lt;port&gt;</code> (no Docker DNS, no bridge).
+The <strong>cost</strong> is the port-collision fragility above: on host networking a container's
+port is the <em>host's</em> port, shared across all the box's IP aliases — which is the entire
+reason the <code>--listen_ip</code> / <code>--web.listen-address</code> / <code>GF_SERVER_HTTP_ADDR</code> overrides
+exist. A junior who removes those "to simplify" will break the IQFeed emulator's <code>:9100</code>
+and re-occupy ports on the secondary IPs.</p>
+<hr />
+<h2 id="4-grafana-provisioning-how-dashboardsdatasource-appear-with-zero-clicks">4. Grafana provisioning — how dashboards/datasource appear with zero clicks</h2>
+<p><strong>Where:</strong> <code>grafana/provisioning/</code> (config) + <code>grafana/dashboards/</code> (the JSONs).</p>
+<ul>
+<li><strong>Datasource</strong> (<code>provisioning/datasources/prometheus.yml</code>). On first boot Grafana reads
+  this and auto-creates a Prometheus datasource (<code>uid: prometheus</code>, <code>url:
+  http://localhost:9090</code>, <code>isDefault: true</code>). No manual "Add data source" step. The
+  fixed <code>uid: prometheus</code> matters — the dashboard JSONs reference the datasource by that
+  uid, so don't rename it.</li>
+<li><strong>Dashboard provider</strong> (<code>provisioning/dashboards/dashboards.yml</code>). Type <code>file</code>, watching
+  <code>/dashboards</code> (the bind-mounted <code>grafana/dashboards/</code>) with
+  <code>updateIntervalSeconds: 30</code> — so <strong>editing a dashboard JSON in the repo shows up in
+  Grafana within 30s</strong>, no restart. <code>allowUiUpdates: true</code> lets you also edit in the UI;
+  <code>disableDeletion: false</code>.</li>
+<li><strong>The two shipped dashboards</strong> are <code>cadvisor-exporter.json</code> (per-container
+  CPU/mem/net/fs) and <code>node-exporter-full.json</code> (host CPU/RAM/disk/net) — standard
+  community dashboards, not hand-authored here.</li>
+<li><strong>Provisioning is bind-mount-path-sensitive.</strong> This is the root of a real prod outage:
+  the README documents that <code>.50</code>'s Grafana was deployed from the pre-reorg path
+  <code>~/dev/monitoring</code>, whose <code>grafana/provisioning</code> + <code>grafana/dashboards</code> are now empty
+  dockerd-auto-created dirs — so provisioning changes never reach <code>.50</code>. Always deploy
+  from <code>~/dev/platform/monitoring</code>.</li>
+</ul>
+<hr />
+<h2 id="tldr-for-the-junior">TL;DR for the junior</h2>
+<ul>
+<li>The only real code is <code>cron-sampler.sh</code>; its one algorithm is <code>to_mib()</code> unit
+  normalization, and its one operational trap is the cron <code>PATH</code> and the crontab path.</li>
+<li>Everything else is upstream images tuned by config. The tuning constants
+  (housekeeping 15s, port 8189, per-IP binding) each fix a specific bug — read §3 before
+  editing compose.</li>
+<li>Host networking + secondary IPs is the theme behind most of the odd-looking overrides.</li>
+<li>Prometheus/Grafana state is disposable (30d, re-provisions on restart); the CSV trail
+  is the independent fallback.</li>
+</ul>
+</body>
+</html>
