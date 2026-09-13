@@ -1,0 +1,17 @@
+scripts/check-doc-impact.py
+scripts/check-item-references.py
+scripts/check-scope.py
+scripts/check-ticket-shape.py
+scripts/check-ticket-status.py
+scripts/decisions-index.py
+scripts/decisions-into-tickets.py
+scripts/doc_kit.py
+scripts/epics.sh
+scripts/install-git-hooks.sh
+scripts/mirror-openproject.py
+scripts/mirror-scope.sh
+scripts/repo_files.py
+scripts/stamp-ticket-times.py
+scripts/wi.py
+scripts/git-hooks/commit-msg
+scripts/git-hooks/pre-commit

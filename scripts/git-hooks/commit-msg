@@ -284,4 +284,9 @@ fi
 
 [ -n "$epics_note" ] && echo "  $epics_note" >&2
 [ "$bad" = 0 ] || { echo >&2; exit 1; }
+# A repo's own message rules live in scripts/git-hooks/commit-msg.local (KIT-023); it
+# receives the message file and runs after the kit's rules. Non-zero refuses the commit.
+if [ -x "$repo/scripts/git-hooks/commit-msg.local" ]; then
+  "$repo/scripts/git-hooks/commit-msg.local" "$msg_file" || exit 1
+fi
 exit 0

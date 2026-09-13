@@ -1,0 +1,317 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>TICKETING</title>
+<style>
+:root {
+  --fg: #24292f;
+  --muted: #57606a;
+  --bg: #ffffff;
+  --accent: #0969da;
+  --border: #d0d7de;
+  --code-bg: #f6f8fa;
+}
+* { box-sizing: border-box; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  color: var(--fg);
+  background: var(--bg);
+  max-width: 1100px;
+  margin: 40px auto;
+  padding: 0 24px 80px;
+  line-height: 1.55;
+}
+h1 { font-size: 2em; border-bottom: 2px solid var(--border); padding-bottom: 8px; margin-top: 1.2em; }
+h2 { font-size: 1.5em; border-bottom: 1px solid var(--border); padding-bottom: 6px; margin-top: 1.8em; }
+h3 { font-size: 1.2em; margin-top: 1.6em; }
+h4 { font-size: 1.05em; margin-top: 1.4em; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: var(--code-bg);
+  padding: 0.15em 0.4em;
+  border-radius: 4px;
+  font-size: 0.92em;
+}
+pre {
+  background: var(--code-bg);
+  padding: 16px;
+  border-radius: 6px;
+  overflow-x: auto;
+  line-height: 1.45;
+}
+pre code { background: transparent; padding: 0; font-size: 0.9em; }
+table { border-collapse: collapse; margin: 1em 0; }
+th, td { border: 1px solid var(--border); padding: 8px 12px; text-align: left; }
+th { background: var(--code-bg); font-weight: 600; }
+blockquote {
+  border-left: 4px solid var(--border);
+  margin-left: 0;
+  padding: 0 16px;
+  color: var(--muted);
+}
+hr { border: 0; border-top: 1px solid var(--border); margin: 2em 0; }
+.mermaid { background: var(--code-bg); padding: 12px; border-radius: 6px; margin: 1em 0; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({startOnLoad:true, theme:'default'});</script>
+</head>
+<body>
+<h1 id="ticketing-what-an-agent-does-here-step-by-step">Ticketing — what an agent does here, step by step</h1>
+<p>This repository tracks work as <strong>files</strong>: one ticket per file in <code>docs/tickets/</code>,
+moved to <code>docs/tickets/closed/</code> when done, never deleted. Git hooks enforce the rules
+offline and tell you the fixing command at the moment you break one. Read this once;
+after that the hooks teach.</p>
+<p>Two kinds of repository use this exact document:</p>
+<ul>
+<li>a <strong>work repo</strong> (code lives here; stories, tasks, bugs and spikes live here), and</li>
+<li>an <strong>epics repo</strong> named <code>&lt;scope&gt;-epics</code> (only EPICs live here — the parents of work
+  that spans several repos).</li>
+</ul>
+<p><code>docs/doc-kit.config</code> says which one this is (<code>work_item_types = EPIC</code> means an
+epics repo; <code>epics_scope = &lt;name&gt;</code> means a work repo whose epics live in <code>&lt;name&gt;-epics</code>).</p>
+<h2 id="1-start-of-a-session">1. Start of a session</h2>
+<pre><code class="language-bash">git fetch -q                       # the hooks compare against origin/master
+python3 scripts/wi.py              # the board: in flight, blocked, queued, by priority
+bash scripts/epics.sh fetch        # work repo with a scope: refresh the epics clone
+</code></pre>
+<p>Pick the highest-priority unblocked item. If nothing covers what you must do, <strong>open a
+ticket first</strong> — nothing is too small for a TASK.</p>
+<h2 id="2-create-a-ticket-one-at-a-time-on-master-then-push">2. Create a ticket — one at a time, on master, then push</h2>
+<pre><code class="language-bash">git switch master &amp;&amp; git pull -q
+python3 scripts/wi.py new MDAPI-012 STORY &quot;Serve-time split adjustment&quot; --area marketdata --epic MKTD-003
+#   → docs/tickets/MDAPI-012-serve-time-split-adjustment.md   (from docs/templates/ticket-STORY.md)
+$EDITOR docs/tickets/MDAPI-012-*.md       # fill the contract (below)
+git add docs/tickets/MDAPI-012-*.md
+git commit -m &quot;MDAPI-012: file — Serve-time split adjustment (ticket creation)&quot;
+git push                                  # BEFORE branching: the hooks check origin/master
+</code></pre>
+<p>Rules the hooks apply at this moment:</p>
+<ul>
+<li><strong>One creation per commit.</strong> <code>wi.py new</code> refuses while another new ticket is
+  uncommitted. Create → commit → push → next.</li>
+<li><strong>The id is <code>PREFIX-NNN</code></strong>, and the prefix must be declared in <code>docs/doc-kit.config</code>
+  (<code>prefixes =</code>) or already in use. Anything else id-shaped (<code>SHA-256</code>, <code>ADR-007</code>) is
+  prose, not a ticket — and words like <code>API</code>, <code>SHA</code>, <code>RFC</code>, <code>TLS</code> can never be prefixes
+  (<code>prefix_denylist</code>). Choosing one: 2–10 capitals, unique across the scope; in a
+  multi-repo scope <strong>one prefix per repo</strong>, derived from the repo name (<code>marketdata-api →
+  MDAPI</code>, <code>uw-flow-indexer → UWFI</code>); in a single-repo product, one prefix per area
+  (open-teleporter's <code>HOST</code>, <code>RFB</code>, <code>SEC</code>). Don't mix the two conventions in one scope.</li>
+<li><strong>The type is one of</strong> <code>EPIC STORY TASK BUG SPIKE</code>, chosen by what <em>closing</em> needs:</li>
+</ul>
+<table>
+<thead>
+<tr>
+<th>type</th>
+<th>closes when</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>STORY</td>
+<td>its acceptance tests pass; it owns its own test</td>
+</tr>
+<tr>
+<td>BUG</td>
+<td>a committed reproduction failed first and now passes, gate-wired</td>
+</tr>
+<tr>
+<td>TASK</td>
+<td>the thing is done; no current-state claim changed</td>
+</tr>
+<tr>
+<td>SPIKE</td>
+<td>a finding or a decision — "we looked; the answer is no" closes honestly</td>
+</tr>
+<tr>
+<td>EPIC</td>
+<td>every child story is closed — a tracking parent, never worked on directly</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li><strong>The contract</strong> (from the template) must be present before any history: a plain-
+  English <code>## Summary</code> first; for STORY/BUG a <code>## The story</code>, <code>## Acceptance criteria</code>
+  as a list of <code>- **AC-n**</code>, <code>## Test cases</code> mapping each to <code>TC-&lt;ID&gt;-nnn</code> and the
+  command that runs it; and <code>## Documentation impact</code> — the documents this change
+  will make stale, each existing (or marked <code>(new)</code>), unconditionally, or <code>None.</code></li>
+<li><strong>A decision that drove this item:</strong> write <code>{{Dn}}</code> anywhere in the ticket. At commit it
+  becomes <code>Dn</code> in place and the full text lands under <code>## Decisions</code>; a <code>{{Dn}}</code> naming no
+  decision refuses the commit. <code>python3 scripts/wi.py decisions &lt;ID&gt;</code> lists what an item carries.</li>
+<li><strong><code>epic:</code></strong> (optional) must name a real EPIC. In a scoped work repo it lives in
+  <code>&lt;scope&gt;-epics</code> and must already be <strong>pushed</strong> there. In an epics repo, only EPICs
+  may be created.</li>
+<li><strong>Never in a feature branch.</strong> A ticket born inside a branch is invisible to every
+  other agent until merge (the board reads master), so the hook refuses a
+  <code>&lt;type&gt;/&lt;ID&gt;</code> branch commit until <code>&lt;ID&gt;</code> is on <code>origin/master</code>.</li>
+</ul>
+<h2 id="3-work-on-a-branch-named-for-the-item">3. Work — on a branch named for the item</h2>
+<pre><code class="language-bash">git switch -c story/MDAPI-012            # story/ bug/ task/ spike/ — exactly one item per branch
+... edit, test ...
+git commit -m &quot;MDAPI-012: adjust at serve time, not at ingest
+
+Follows the approach settled in MKTD-003; supersedes MDAPI-004.&quot;
+git push -u origin story/MDAPI-012
+</code></pre>
+<ul>
+<li><strong>Every commit's subject names the branch's item.</strong> Other items go in the body —
+  they are citations and must exist, in any status.</li>
+<li><strong>Nothing lands on master directly</strong> except merges, reverts, ticket-only commits
+  (creation, and epic maintenance), and the machine commits listed in the config.</li>
+<li><strong>A decision made while working is written the same commit</strong> — as its OWN file:
+  <code>python3 scripts/wi.py decision new "&lt;title&gt;"</code> → <code>docs/decisions/Dn-&lt;slug&gt;.md</code>, four
+  parts: what we picked, the alternatives and why each lost, the constraint that forced
+  it, what would make us revisit. Never edit a decision; to reverse one, add a new one
+  marking the old <strong>SUPERSEDED by Dn</strong>. <strong>The hook copies the decision, in full, into the
+  ticket you are working</strong> (<code>## Decisions</code>, same commit) — nothing is typed twice. The index, <code>docs/DECISIONS_INDEX.md</code>, is
+  generated — never hand-edit it; an older hand-written <code>docs/DECISIONS.md</code> stays frozen.</li>
+<li><strong>A new <code>- [ ]</code> bullet in <code>TODO.md</code></strong> must name an item or the commit must create one.</li>
+<li><strong>A bug found in passing</strong> is fixed here or filed — never neither.</li>
+</ul>
+<p>The first commit on the branch stamps <code>started:</code> into the ticket automatically.</p>
+<h2 id="4-close-in-the-final-branch-commit-then-merge">4. Close — in the final branch commit, then merge</h2>
+<p>Before closing, ask: <em>what does a reader of the contract or the subsystem document now
+believe that this change made false?</em> Fix each of those documents <strong>in the closing
+commit</strong> — the Documentation impact section is executed, not declared.</p>
+<pre><code class="language-bash">sed -i 's/^status:.*$/status:     CLOSED/' docs/tickets/MDAPI-012-*.md
+git mv docs/tickets/MDAPI-012-*.md docs/tickets/closed/
+git add &lt;the documents the impact section named&gt;
+git commit -m &quot;MDAPI-012: serve-time adjustment, docs updated (closes)&quot;
+bash tests/…                             # the repo's gate, green
+git switch master &amp;&amp; git merge --no-ff story/MDAPI-012 &amp;&amp; git push
+git branch -d story/MDAPI-012
+</code></pre>
+<p>The hook stamps <code>closed:</code> (and repairs a missing <code>started:</code>) when the file is staged
+under <code>closed/</code>. Status is <code>OPEN | BLOCKED | CLOSED</code> — "in progress" is derived from
+commits, never written.</p>
+<h2 id="5-epics-work-that-spans-repositories">5. Epics — work that spans repositories</h2>
+<p>A story must own one self-contained test. A change touching two repositories cannot,
+so <strong>it is an EPIC with one STORY per repository</strong>. Stories live where the code
+lives; the epic lives in the scope's epics repo.</p>
+<pre><code class="language-bash">cd ~/dev/stealth-epics                      # the epics repo for scope &quot;stealth&quot;
+git pull -q
+python3 scripts/wi.py new MKTD-003 EPIC &quot;Split adjustment across the market-data stack&quot;
+git add docs/tickets &amp;&amp; git commit -m &quot;MKTD-003: file — Split adjustment across the market-data stack (ticket creation)&quot;
+git push                                    # an epic exists for others ONLY at origin/master
+</code></pre>
+<ul>
+<li><strong>Epics are created, updated and closed on master</strong> by ticket-only commits (the
+  subject names the epic; the commit touches only ticket files and the paths listed
+  in <code>maintenance_paths</code>, e.g. <code>repos.tsv</code>, <code>docs/DECISIONS.md</code>). Nobody branches an
+  epic; nobody commits code against one.</li>
+<li><strong>Children are derived</strong> from each story's <code>epic:</code> field — never listed by hand.</li>
+<li><strong><code>repos.tsv</code></strong> in the epics repo lists every member repository with its ticket prefix;
+  add a row when a repo adopts the kit. The epics repo's pre-commit checks it against the
+  repos themselves (<code>scripts/check-scope.py</code>): a row's prefix must equal what the repo
+  declares, no prefix twice, every repo claiming the scope has a row.</li>
+<li>The epic <strong>closes when its last story closes</strong>. Closing it with an open child is not
+  blocked at commit time (the epics repo cannot see other repos offline); the board
+  flags it.</li>
+</ul>
+<h2 id="6-a-fresh-machine-or-a-clone-somewhere-else">6. A fresh machine or a clone somewhere else</h2>
+<pre><code class="language-bash">git clone &lt;work repo&gt; &amp;&amp; cd &lt;work repo&gt;
+bash scripts/install-git-hooks.sh       # hooks are local config; a clone has none until this
+bash scripts/epics.sh ensure            # scoped repo: clones &lt;scope&gt;-epics beside this repo
+#   or: export EPICS_ROOT=/path/to/&lt;scope&gt;-epics
+</code></pre>
+<p>Everything else is offline. If the epics clone is missing, ordinary commits pass with a
+NOTE; creating a story that names an epic fails loudly with the clone command.</p>
+<h2 id="7-when-a-hook-refuses-what-it-means">7. When a hook refuses — what it means</h2>
+<table>
+<thead>
+<tr>
+<th>the message says</th>
+<th>do this</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>no work item referenced</td>
+<td>put the item id in the <strong>subject</strong> line; open one if none fits</td>
+</tr>
+<tr>
+<td>work commits do not land on master</td>
+<td><code>git switch -c &lt;type&gt;/&lt;ID&gt;</code> and commit there</td>
+</tr>
+<tr>
+<td>this branch belongs to X</td>
+<td>the subject must name X; other items go in the body</td>
+</tr>
+<tr>
+<td>has no ticket on origin/master yet</td>
+<td>create the ticket on master, commit, <strong>push</strong>, come back</td>
+</tr>
+<tr>
+<td>is CLOSED</td>
+<td>reopen it or open a new item — unless this commit is the close (stage the move)</td>
+</tr>
+<tr>
+<td>is an EPIC, a tracking parent</td>
+<td>commit against one of its stories; cite the epic in the body</td>
+</tr>
+<tr>
+<td>cited in the body but does not exist</td>
+<td>file it, or fix the id — a name that looks tracked and isn't is the worst case</td>
+</tr>
+<tr>
+<td>names an epic that does not exist</td>
+<td>create the epic in the epics repo, <strong>push</strong>, then retry</td>
+</tr>
+<tr>
+<td>epics live in <code>&lt;scope&gt;-epics</code></td>
+<td>you created an EPIC in a work repo; create it there instead</td>
+</tr>
+<tr>
+<td>no <code>&lt;scope&gt;-epics</code> repo beside this repo</td>
+<td><code>bash scripts/epics.sh ensure</code> (or set <code>EPICS_ROOT</code>)</td>
+</tr>
+<tr>
+<td>a ticket fails check-…</td>
+<td>read the checker's own lines above the refusal; fix the file</td>
+</tr>
+<tr>
+<td>new TODO items, but no work item</td>
+<td>make the bullet name an item, or create one in this commit</td>
+</tr>
+<tr>
+<td>nothing is staged and the subject names no existing item</td>
+<td>an amend/empty commit must still name a real item</td>
+</tr>
+</tbody>
+</table>
+<p><code>--no-verify</code> exists for exactly one case: re-authoring a commit the hook already
+accepted (e.g. fixing the author). Never for anything else; its use should be rare and
+visible.</p>
+<h2 id="8-do-dont">8. Do / don't</h2>
+<ul>
+<li>Do create the ticket before the branch, push, then branch. Don't batch creations.</li>
+<li>Do keep the subject to one item. Don't cite a second item in the subject.</li>
+<li>Do write decisions as you make them, one file each, in the same commit. Don't "catch up" later, and don't append to a shared log.</li>
+<li>Do close with the documents updated. Don't move a file to <code>closed/</code> and call it done.</li>
+<li>Do file what you find. Don't leave a bug in a comment or a TODO with no item.</li>
+<li>Don't edit <code>~/dev/&lt;scope&gt;-epics</code> on a branch or leave it dirty — every session on the
+  machine reads it (at <code>origin/master</code>, so what you did not push does not exist).</li>
+</ul>
+<h2 id="9-maintaining-the-kit-itself-only-in-the-ticketing-template-repo">9. Maintaining the kit itself (only in the <code>ticketing-template</code> repo)</h2>
+<p>The payload is <code>kit/</code>; the repo's own <code>scripts/</code> and <code>docs/</code> are an <em>installed copy</em> of
+it. After changing anything under <code>kit/</code>, re-run <code>bash install.sh .</code> so the copy the
+hooks actually execute is the new one, and bump <code>VERSION</code> in the release ticket. Every
+change rides a <code>KIT-nnn</code> ticket like anywhere else; <code>bash tests/run-all.sh</code> is the gate.</p>
+<p>Four lessons from the first day of dogfooding, each of which cost a cycle:</p>
+<ul>
+<li><strong>Never silence <code>git add</code>.</strong> <code>git add a b missing 2&gt;/dev/null</code> stages NOTHING when one
+  pathspec is missing — the close of KIT-016 shipped without its implementation that way,
+  and the gate stayed green because it tests the working tree. Let it fail loudly.</li>
+<li><strong><code>git add</code> after <code>git mv</code>.</strong> Editing a file and then <code>git mv</code>-ing it stages the rename
+  with the OLD content; the closing commit carried <code>status: OPEN</code>. Move, then add.</li>
+<li><strong>Patch files with a script, not nested heredocs.</strong> Three attempts at one fix died on
+  escaping (<code>\\s</code> vs <code>\s</code>, an em dash outside a string). Write the patch to a file or use
+  <code>str.replace</code>/function-based substitution, and assert the patch landed before going on.</li>
+<li><strong>Assert a clean tree after every close</strong>, and check the patch is on disk before the
+  gate: <code>[ -z "$(git status --short)" ] || exit 1</code>. A <code>&amp;&amp;</code>-chain under <code>set -e</code> swallows
+  a refused commit; check exit codes explicitly.</li>
+</ul>
+</body>
+</html>

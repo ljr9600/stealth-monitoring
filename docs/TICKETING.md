@@ -1,5 +1,8 @@
 # Ticketing — what an agent does here, step by step
 
+(Setting up a machine or a clone — cloning the kit and the epics repo, installing hooks —
+is the kit's `START-HERE.md`, not repeated here.)
+
 This repository tracks work as **files**: one ticket per file in `docs/tickets/`,
 moved to `docs/tickets/closed/` when done, never deleted. Git hooks enforce the rules
 offline and tell you the fixing command at the moment you break one. Read this once;
@@ -192,6 +195,13 @@ visible.
   machine reads it (at `origin/master`, so what you did not push does not exist).
 
 ## 9. Maintaining the kit itself (only in the `ticketing-template` repo)
+
+A repo that needs MORE than the kit's hooks (its own generators, renderers, targeted
+tests, extra message rules) puts them in `scripts/git-hooks/pre-commit.local` and
+`scripts/git-hooks/commit-msg.local` — the kit's hooks call them after their own checks,
+and upgrades never touch them. A repo with a better decisions index sets
+`decisions_index = none`. The installer refuses to overwrite any `scripts/` file it did
+not ship (`KIT_FILES` is its manifest).
 
 The payload is `kit/`; the repo's own `scripts/` and `docs/` are an *installed copy* of
 it. After changing anything under `kit/`, re-run `bash install.sh .` so the copy the

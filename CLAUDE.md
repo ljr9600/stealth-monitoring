@@ -14,4 +14,5 @@ print the fixing command when you break a rule.
 - Multi-repo work is an EPIC in `stealth-epics` (beside this repo or an ancestor), one STORY per repo (`epic: <ID>`).
 - Decisions: `python3 scripts/wi.py decision new "<title>"` → one file in `docs/decisions/`, same commit, four parts; it is copied in full into the ticket you are on; cite an earlier one with `{{Dn}}`. Status: `OPEN | BLOCKED | CLOSED`.
 - After every clone: `bash scripts/install-git-hooks.sh`, then `bash scripts/epics.sh ensure`
+- New here? `docs/TICKETING.md` is the procedure; the kit is https://github.com/ljr9600/ticketing-template.git — start at its `START-HERE.md`.
 <!-- ticketing-template:end -->

@@ -20,9 +20,9 @@ staged="$(git diff --cached --name-only)"
 
 # The decisions index is DERIVED from the decision files (KIT-016): regenerate and stage it
 # every commit, so a hand edit never survives and an added decision is indexed at once.
-if [ -f "$repo/scripts/gen-decisions-index.py" ]; then
-  idx="$(python3 "$repo/scripts/gen-decisions-index.py")" || { echo "pre-commit: gen-decisions-index.py failed" >&2; exit 1; }
-  git add "$repo/$idx" 2>/dev/null || true
+if [ -f "$repo/scripts/decisions-index.py" ]; then
+  idx="$(python3 "$repo/scripts/decisions-index.py")" || { echo "pre-commit: decisions-index.py failed" >&2; exit 1; }
+  case "$idx" in docs/*) git add "$repo/$idx" 2>/dev/null || true ;; esac
 fi
 
 if [ -f "$repo/scripts/stamp-ticket-times.py" ]; then
@@ -52,5 +52,11 @@ fi
 if [ -f "$repo/.epics-root" ] && [ -f "$repo/scripts/check-scope.py" ]; then
   python3 "$repo/scripts/check-scope.py" >/tmp/ticketing-template-scope.log 2>&1 || { sed 's/^/    /' /tmp/ticketing-template-scope.log >&2; echo "pre-commit: REJECTED — the scope registry (repos.tsv) disagrees with the repos." >&2; exit 1; }
   tail -1 /tmp/ticketing-template-scope.log
+fi
+# A repo's OWN pre-commit work (generators, renderers, targeted tests) lives in
+# scripts/git-hooks/pre-commit.local and runs after the kit's checks (KIT-023). Upgrades
+# never touch it. Exit non-zero to refuse the commit.
+if [ -x "$repo/scripts/git-hooks/pre-commit.local" ]; then
+  "$repo/scripts/git-hooks/pre-commit.local" || { echo "pre-commit: REJECTED by pre-commit.local" >&2; exit 1; }
 fi
 exit 0
