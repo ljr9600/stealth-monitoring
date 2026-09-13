@@ -1,0 +1,287 @@
+#!/usr/bin/env bash
+# Every commit names a live work item. (ticketing-template; extracted from open-teleporter D339.)
+#
+# A rule written in a CLAUDE.md depends on remembering, and remembering is not
+# reliable — so the rule is enforced here, where it cannot be forgotten. A commit
+# whose subject does not name an OPEN work item is REJECTED. Strict about:
+#   * the id must EXIST   — and be a WORK ITEM: ids are recognised by PREFIX (the
+#                           ticket set ∪ the prefixes docs/doc-kit.config declares
+#                           ∪ the scope's epics), never by shape alone, so SHA-256
+#                           and ADR-007 are prose, not citations (D434)
+#   * the item must be OPEN — committing against a closed item hides the work
+#   * no bypass by habit  — --no-verify is the escape hatch; visible and rare
+#
+# Everything project-specific comes from docs/doc-kit.config. This hook reads
+# the working tree and the local epics clone's origin/<default_branch>; it never
+# touches the network (bash scripts/epics.sh does that, deliberately).
+#
+# Install:  bash scripts/install-git-hooks.sh
+set -euo pipefail
+export PYTHONDONTWRITEBYTECODE=1   # the checkers must not litter the repo (KIT-011)
+msg_file="$1"
+msg="$(cat "$msg_file")"
+repo="$(git rev-parse --show-toplevel)"
+
+cfg() { sed -nE "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*(.*)$/\1/p" "$repo/docs/doc-kit.config" 2>/dev/null | head -1; }
+TDIR="$(cfg tickets_dir)";            TDIR="${TDIR:-docs/tickets}"; TDIR="${TDIR%/}"
+DEFAULT_BRANCH="$(cfg default_branch)"; DEFAULT_BRANCH="${DEFAULT_BRANCH:-master}"
+TYPES="$(cfg work_item_types)";       TYPES="${TYPES:-EPIC STORY TASK BUG SPIKE}"
+EXEMPT="$(cfg commit_exempt_regex)"
+KEXEMPT="$(cfg kit_exempt_regex)"; KEXEMPT="${KEXEMPT:-^chore\\(ticketing-template\\): (install|upgrade) v[0-9]+\\.[0-9]+\\.[0-9]+}"
+EPICS_SCOPE="$(cfg epics_scope)"
+branch_types="$(tr ' ' '\n' <<<"$TYPES" | grep -vx EPIC | tr 'A-Z' 'a-z' | paste -sd'|' - || true)"
+
+# --- exemptions, each with a reason -----------------------------------------
+grep -qE '^Merge (branch|remote-tracking|pull request)' <<<"$msg" && exit 0   # named by the merged commits
+grep -qE '^Revert "' <<<"$msg" && exit 0                                      # names the reverted commit
+subject="$(head -1 <<<"$msg")"
+if { [ -n "$EXEMPT" ] && grep -qE "$EXEMPT" <<<"$subject"; } || grep -qE "$KEXEMPT" <<<"$subject"; then exit 0; fi   # machine commits: the repo's list, and the installer's
+
+# A RE-AUTHOR: nothing staged AND the subject is HEAD's subject — an amend --no-edit /
+# --reset-author of a commit the hook already accepted. Nothing changes, so nothing else
+# can be checked; the subject must still name an item that exists here (KIT-002). Any
+# other empty-index commit (--allow-empty with a new message, or a checker fixture) takes
+# the normal path below — the shortcut must never skip the closed/duplicate/citation
+# rules (KIT-010).
+if git diff --cached --quiet 2>/dev/null && [ "$(git log -1 --format=%s 2>/dev/null)" = "$subject" ]; then
+  for _id in $(grep -oE '\b[A-Z]{2,10}-[0-9]{3}\b' <<<"$subject" | sort -u); do
+    # Test the OUTPUT, not ls's exit code: `ls live missing` exits non-zero even when
+    # it listed `live` (KIT-009 — the same trap the body-citation check documents).
+    [ -n "$(ls "$repo/$TDIR/$_id"-*.md "$repo/$TDIR/closed/$_id"-*.md 2>/dev/null | head -1)" ] && exit 0
+  done
+  echo "  COMMIT REJECTED — re-authoring a commit whose subject names no existing work item." >&2
+  exit 1
+fi
+
+# --- ticket-maintenance commits land on the default branch (KIT-005) ---------
+# A commit that touches ONLY ticket files (+ maintenance_paths: TODO.md, the decision
+# log, repos.tsv …) and whose subject names one of them is allowed anywhere, including
+# the default branch, when every staged ticket that is not brand-new is an EPIC —
+# epics are created, updated and closed on the default branch and never branched; a
+# story's edits and its close ride its own branch. This subsumes the old "creation"
+# exemption (a new file of any type qualifies). Such a commit skips the gate, so the
+# three checks that catch a malformed ticket run HERE.
+MAINT="$(cfg maintenance_paths)"; MAINT="${MAINT:-TODO.md docs/DECISIONS.md docs/decisions docs/DECISIONS_INDEX.md CLAUDE.md}"
+# Machine-owned files the hooks/installer write are ALWAYS allowed to ride (KIT-019): the
+# decisions index (regenerated every commit), the rendered CLAUDE block, decision files.
+MAINT="$MAINT docs/DECISIONS_INDEX.md CLAUDE.md docs/decisions"
+staged_all="$(git diff --cached --name-only || true)"
+if [ -n "$staged_all" ]; then
+  maint_re="$(tr ' ' '\n' <<<"$MAINT" | sed 's/[.[\*^$|]/\\&/g' | paste -sd'|' -)"
+  if ! grep -qvE "^(${TDIR}/|(${maint_re})(/|$))" <<<"$staged_all"; then
+    present="$(git diff --cached --name-only --diff-filter=AMR | grep -E "^${TDIR}/(closed/)?[A-Z]{2,10}-[0-9]{3}-.*\.md$" || true)"
+    added="$(git diff --cached --name-only --diff-filter=A || true)"
+    qualifies=0
+    for f in $present; do
+      _id="$(grep -oE '[A-Z]{2,10}-[0-9]{3}' <<<"$(basename "$f")" | head -1)"
+      grep -qF "$_id" <<<"$subject" && qualifies=1
+    done
+    if [ "$qualifies" = 1 ]; then
+      for f in $present; do
+        grep -qxF "$f" <<<"$added" && continue            # a new file of any type
+        ty="$(git show ":$f" 2>/dev/null | grep -m1 '^type:' | sed 's/^type:[[:space:]]*//' | tr -d '[:space:]' | tr a-z A-Z || true)"
+        [ "$ty" = "EPIC" ] || { qualifies=0; break; }     # a story/task/bug is maintained on its branch
+      done
+    fi
+    if [ "$qualifies" = 1 ]; then
+      for chk in check-doc-impact.py check-ticket-shape.py check-item-references.py; do
+        if [ -f "$repo/scripts/$chk" ] && ! python3 "$repo/scripts/$chk" >&2; then
+          echo >&2; echo "  COMMIT REJECTED — a ticket fails $chk (see above). A ticket-only commit" >&2
+          echo "  skips the gate, so the problem would otherwise land and break every branch." >&2; echo >&2
+          exit 1
+        fi
+      done
+      exit 0
+    fi
+  fi
+fi
+
+# --- branch discipline: the default branch receives only finished work -------
+branch="$(git symbolic-ref --quiet --short HEAD 2>/dev/null || echo detached)"
+if [ "$branch" = "$DEFAULT_BRANCH" ] || [ "$branch" = "main" ]; then
+  subj_id="$(grep -oE '\b[A-Z]{2,10}-[0-9]{3}\b' <<<"$subject" | head -1 || true)"
+  hint="${subj_id:-<AREA>-NNN}"
+  cat >&2 <<MSG
+
+  COMMIT REJECTED — work commits do not land on $DEFAULT_BRANCH.
+
+  Work happens on a branch named for its item and arrives as a merge:
+
+      git switch -c story/$hint        # or bug/, task/, spike/
+      ... work, commit, push ...
+      git switch $DEFAULT_BRANCH && git merge --no-ff story/$hint
+
+  Allowed directly on $DEFAULT_BRANCH: merges, reverts, a commit that only creates a
+  work-item file, and the machine commits listed in docs/doc-kit.config.
+
+MSG
+  exit 1
+fi
+if [ -n "$branch_types" ] && [[ "$branch" =~ ^(${branch_types})/(.+)$ ]]; then
+  want="${BASH_REMATCH[2]}"
+  if ! grep -qF "$want" <<<"$subject"; then
+    cat >&2 <<MSG
+
+  COMMIT REJECTED — this branch belongs to $want; the subject must name it.
+  A branch carries exactly one work item. Cite other items in the BODY freely.
+
+MSG
+    exit 1
+  fi
+  # A work item is BORN on the default branch (GOV-011): the board reads it, so a
+  # ticket created inside a feature branch is invisible to everyone until merge.
+  if git rev-parse --verify --quiet "origin/$DEFAULT_BRANCH" >/dev/null 2>&1; then
+    if ! git ls-tree -r --name-only "origin/$DEFAULT_BRANCH" -- "$TDIR" 2>/dev/null \
+         | grep -qE "/(closed/)?${want}-[^/]*\.md$"; then
+      cat >&2 <<MSG
+
+  COMMIT REJECTED — $want has no ticket on origin/$DEFAULT_BRANCH yet (GOV-011).
+
+  Tickets are created ON $DEFAULT_BRANCH so every agent's in-flight work shows on the
+  board. Create it there first, then return to this branch:
+
+      git switch $DEFAULT_BRANCH && git pull
+      python3 scripts/wi.py new $want <TYPE> "<title>"
+      git add $TDIR/$want-*.md
+      git commit -m "$want: file — <title> (ticket creation)" && git push
+      git switch $branch
+
+  (origin/$DEFAULT_BRANCH is what is checked; run 'git fetch' if you just pushed it.)
+
+MSG
+      exit 1
+    fi
+  fi
+fi
+
+# --- which ids are work items? prefix vocabulary (D434) ----------------------
+# The scope's epics, if any, read from the local clone at origin/<default_branch>.
+# Missing clone: epic citations cannot be checked here — say so, don't block (the
+# shape check at story creation is the hard gate that requires the clone).
+epics_ls=""; epics_note=""
+if [ -n "$EPICS_SCOPE" ]; then
+  if ! epics_ls="$(python3 "$repo/scripts/doc_kit.py" epics-ls 2>/dev/null)"; then
+    epics_ls=""; epics_note="NOTE: ${EPICS_SCOPE}-epics not found; epic citations not checked (bash scripts/epics.sh ensure)"
+  fi
+fi
+valid_prefixes="$( {
+    ls "$repo/$TDIR"/*.md "$repo/$TDIR"/closed/*.md 2>/dev/null | grep -oE '/[A-Z]{2,10}-[0-9]{3}-' | grep -oE '[A-Z]{2,10}';
+    cfg prefixes | tr ' ' '\n';
+    cut -f1 <<<"$epics_ls" | grep -oE '^[A-Z]{2,10}';
+  } | grep -E '^[A-Z]{2,10}$' | sort -u || true )"
+is_item_id() { [ -z "$valid_prefixes" ] || grep -qxF "${1%%-*}" <<<"$valid_prefixes"; }
+extract_ids() { grep -oE '\b[A-Z]{2,10}-[0-9]{3}\b' | sort -u \
+  | while IFS= read -r _id; do is_item_id "$_id" && printf '%s\n' "$_id"; done; }
+
+# resolve <id> -> "<status>\t<type>\t<where>" ; where = <path> | epics ; empty = unknown
+resolve() {
+  local id="$1" hits
+  hits="$(ls "$repo/$TDIR/$id"-*.md "$repo/$TDIR/closed/$id"-*.md 2>/dev/null || true)"
+  # ONE line per answer: a multi-line value here would split the fields below.
+  if [ -n "$hits" ] && [ "$(wc -l <<<"$hits")" -gt 1 ]; then printf 'DUP\t\t%s\n' "$(tr '\n' ' ' <<<"$hits")"; return; fi
+  if [ -n "$hits" ]; then
+    printf '%s\t%s\t%s\n' \
+      "$(grep -m1 '^status:' "$hits" | sed 's/^status:[[:space:]]*//' | tr -d '[:space:]' | tr a-z A-Z)" \
+      "$(grep -m1 '^type:'   "$hits" | sed 's/^type:[[:space:]]*//'   | tr -d '[:space:]' | tr a-z A-Z)" \
+      "$hits"; return
+  fi
+  local line; line="$(grep -P "^${id}\t" <<<"$epics_ls" || true)"
+  [ -n "$line" ] && printf '%s\t%s\tepics\n' "$(cut -f3 <<<"$line")" "$(cut -f2 <<<"$line")"
+}
+
+# The GOVERNING id comes from the SUBJECT line only — the item this commit belongs
+# to. Ids in the body are REFERENCES to other work; they must exist, any status.
+subject_ids="$(extract_ids <<<"$subject" || true)"
+all_ids="$(extract_ids <<<"$msg" || true)"
+
+if [ -z "$subject_ids" ]; then
+  if [ -n "$all_ids" ]; then
+    cat >&2 <<MSG
+
+  COMMIT REJECTED — the work item must be named in the SUBJECT line.
+  Found in the body but not the subject: $(echo $all_ids)
+  Put it in parentheses at the end of the first line:   docs: what changed ($(echo $all_ids | cut -d' ' -f1))
+
+MSG
+    exit 1
+  fi
+  cat >&2 <<MSG
+
+  COMMIT REJECTED — no work item referenced.
+
+  Every commit names the item it belongs to, in the SUBJECT line, e.g.
+      fix(host): refuse a second viewer instead of leaving it silent (HOST-002)
+  If no work item covers this, open one first:
+      python3 scripts/wi.py new <AREA>-<NNN> <TYPE> "<title>"
+  Nothing is too small for a TASK — that type exists so housekeeping has somewhere
+  to live rather than becoming an untracked commit.
+  ${epics_note}
+MSG
+  exit 1
+fi
+
+staged="$(git diff --cached --name-only || true)"
+bad=0
+for id in $subject_ids; do
+  r="$(resolve "$id")"
+  st="$(cut -f1 <<<"$r")"; ty="$(cut -f2 <<<"$r")"; where="$(cut -f3- <<<"$r")"
+  if [ "$st" = "DUP" ]; then
+    echo "  COMMIT REJECTED — $id exists in BOTH $TDIR/ and $TDIR/closed/:" >&2
+    sed 's|^|      |' <<<"$where" >&2
+    echo "  A closed item is MOVED (git mv), not copied. Delete the stale one." >&2
+    bad=1; continue
+  fi
+  if [ -z "$r" ]; then
+    echo "  COMMIT REJECTED — work item $id does not exist in $TDIR/${epics_ls:+ or ${EPICS_SCOPE}-epics}" >&2
+    [ -n "$epics_note" ] && echo "  $epics_note" >&2
+    bad=1; continue
+  fi
+  # An EPIC is a tracking parent: never worked on directly. The only commits that
+  # name an epic in the subject are the ones that edit the epic's own file
+  # (create/close it) — in the repo where it lives.
+  if [ "$ty" = "EPIC" ] && { [ "$where" = "epics" ] || ! grep -qE "^${TDIR}/(closed/)?${id}-.*\.md$" <<<"$staged"; }; then
+    echo "  COMMIT REJECTED — $id is an EPIC, a tracking parent. Work goes on one of its" >&2
+    echo "  stories; commit against the story, and cite $id in the body." >&2
+    bad=1; continue
+  fi
+  if [ "$st" = "CLOSED" ]; then
+    # The closing commit git-mv's the item into closed/; staged path may be either side.
+    grep -qE "^${TDIR}/(closed/)?${id}-.*\.md$" <<<"$staged" && continue
+    echo "  COMMIT REJECTED — $id is CLOSED. Reopen it, or open a new item." >&2
+    echo "  (To CLOSE it: set status: CLOSED, git mv it into $TDIR/closed/, stage that here.)" >&2
+    bad=1
+  fi
+done
+
+for id in $all_ids; do
+  grep -qx "$id" <<<"$subject_ids" && continue
+  if [ -z "$(resolve "$id")" ]; then
+    echo "  COMMIT REJECTED — $id is cited in the body but does not exist." >&2
+    [ -n "$epics_note" ] && echo "  $epics_note" >&2
+    bad=1
+  fi
+done
+
+# NEW WORK NEEDS ITS OWN ITEM, not a bullet buried in someone else's commit: a
+# commit that ADDS an unchecked TODO bullet must create a work item, or the bullet
+# must name one (D356).
+added_todo="$(git diff --cached -U0 -- TODO.md 2>/dev/null | grep -E '^\+- \[ \]' || true)"
+if [ -n "$added_todo" ]; then
+  creates_item="$(git diff --cached --name-only --diff-filter=A | grep -cE "^${TDIR}/[A-Z]+-[0-9]{3}-.*\.md$" || true)"
+  untracked="$(grep -vE '\b[A-Z]{2,10}-[0-9]{3}\b' <<<"$added_todo" || true)"
+  if [ -n "$untracked" ] && [ "${creates_item:-0}" = "0" ]; then
+    cat >&2 <<MSG
+
+  COMMIT REJECTED — new TODO items, but no work item. These bullets name no item:
+$(sed 's/^/      /' <<<"$untracked" | head -5)
+  A TODO bullet is a pointer to a work item, never a substitute for one: open an
+  item and let the bullet point at it, or reference an existing item in the text.
+
+MSG
+    exit 1
+  fi
+fi
+
+[ -n "$epics_note" ] && echo "  $epics_note" >&2
+[ "$bad" = 0 ] || { echo >&2; exit 1; }
+exit 0

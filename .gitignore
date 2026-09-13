@@ -2,3 +2,5 @@
 # grafana-data), not in the repo — nothing to ignore there.
 *.log
 .env
+__pycache__/
+*.pyc

@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# ticketing-template pre-commit: the machine writes what a human would otherwise remember.
+#
+# Each block states its own condition (no global early exit — a hook that returns
+# early for one reason silently skips every check below it; that happened).
+#
+#   1. Time stamps (GOV-005): created/started/closed are written by the MACHINE at
+#      the moment each event is committed, and staged into this commit.
+#   2. Whenever a ticket is staged, the ticket checkers run: shape, citations,
+#      documentation impact, status invariants. Fast — seconds, never minutes; a
+#      hook that takes minutes gets bypassed with --no-verify.
+#
+# Install:  bash scripts/install-git-hooks.sh
+set -euo pipefail
+export PYTHONDONTWRITEBYTECODE=1   # the checkers must not litter the repo (KIT-011)
+repo="$(git rev-parse --show-toplevel)"
+cfg() { sed -nE "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*(.*)$/\1/p" "$repo/docs/doc-kit.config" 2>/dev/null | head -1; }
+TDIR="$(cfg tickets_dir)"; TDIR="${TDIR:-docs/tickets}"; TDIR="${TDIR%/}"
+staged="$(git diff --cached --name-only)"
+
+# The decisions index is DERIVED from the decision files (KIT-016): regenerate and stage it
+# every commit, so a hand edit never survives and an added decision is indexed at once.
+if [ -f "$repo/scripts/gen-decisions-index.py" ]; then
+  idx="$(python3 "$repo/scripts/gen-decisions-index.py")" || { echo "pre-commit: gen-decisions-index.py failed" >&2; exit 1; }
+  git add "$repo/$idx" 2>/dev/null || true
+fi
+
+if [ -f "$repo/scripts/stamp-ticket-times.py" ]; then
+  python3 "$repo/scripts/stamp-ticket-times.py" || { echo "pre-commit: stamp-ticket-times.py failed" >&2; exit 1; }
+fi
+
+# A decision recorded in this commit is copied into the ticket it belongs to, and a
+# {{Dn}} in a staged ticket expands (KIT-017). Refuses a {{Dn}} that names nothing.
+if [ -f "$repo/scripts/decisions-into-tickets.py" ]; then
+  python3 "$repo/scripts/decisions-into-tickets.py" || { echo "pre-commit: REJECTED — decisions-into-tickets (see above)" >&2; exit 1; }
+  staged="$(git diff --cached --name-only)"
+fi
+
+if grep -qE "^${TDIR}/.*\.md$" <<<"$staged"; then
+  fail=0
+  for chk in check-ticket-shape.py check-item-references.py check-doc-impact.py check-ticket-status.py; do
+    [ -f "$repo/scripts/$chk" ] || continue
+    if ! python3 "$repo/scripts/$chk" >/tmp/ticketing-template-precommit.log 2>&1; then
+      echo "pre-commit: $chk FAILED:" >&2; sed 's/^/    /' /tmp/ticketing-template-precommit.log | tail -20 >&2; fail=1
+    fi
+  done
+  [ "$fail" = 0 ] || { echo "pre-commit: REJECTED — fix the ticket problems above." >&2; exit 1; }
+  echo "pre-commit: tickets well-formed (shape, citations, doc impact, status)"
+fi
+# An epics repo checks its registry against the repos on every commit (KIT-018): a row's
+# prefix equals what the repo declares, no prefix twice, every claimant has a row.
+if [ -f "$repo/.epics-root" ] && [ -f "$repo/scripts/check-scope.py" ]; then
+  python3 "$repo/scripts/check-scope.py" >/tmp/ticketing-template-scope.log 2>&1 || { sed 's/^/    /' /tmp/ticketing-template-scope.log >&2; echo "pre-commit: REJECTED — the scope registry (repos.tsv) disagrees with the repos." >&2; exit 1; }
+  tail -1 /tmp/ticketing-template-scope.log
+fi
+exit 0
