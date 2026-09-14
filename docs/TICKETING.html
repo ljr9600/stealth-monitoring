@@ -60,6 +60,11 @@ hr { border: 0; border-top: 1px solid var(--border); margin: 2em 0; }
 </head>
 <body>
 <h1 id="ticketing-what-an-agent-does-here-step-by-step">Ticketing — what an agent does here, step by step</h1>
+<blockquote>
+<p><strong>STATE: OPERATING PROCEDURE</strong> — the procedure every repository on ticketing-template follows; the git hooks enforce it. Installed by the kit, refreshed on upgrade: edit it in the kit, not here.</p>
+</blockquote>
+<p>(Setting up a machine or a clone — cloning the kit and the epics repo, installing hooks —
+is the kit's <code>START-HERE.md</code>, not repeated here.)</p>
 <p>This repository tracks work as <strong>files</strong>: one ticket per file in <code>docs/tickets/</code>,
 moved to <code>docs/tickets/closed/</code> when done, never deleted. Git hooks enforce the rules
 offline and tell you the fixing command at the moment you break one. Read this once;
@@ -218,6 +223,9 @@ bash scripts/epics.sh ensure            # scoped repo: clones &lt;scope&gt;-epic
 </code></pre>
 <p>Everything else is offline. If the epics clone is missing, ordinary commits pass with a
 NOTE; creating a story that names an epic fails loudly with the clone command.</p>
+<p>Hooks the clone already had in <code>.git/hooks/</code> (a machine-installed doc check, say) are
+not switched off: every kit hook runs them after its own checks, and the installer lists
+each one it found as <code>kept:</code> (KIT-031).</p>
 <h2 id="7-when-a-hook-refuses-what-it-means">7. When a hook refuses — what it means</h2>
 <table>
 <thead>
@@ -295,6 +303,15 @@ visible.</p>
   machine reads it (at <code>origin/master</code>, so what you did not push does not exist).</li>
 </ul>
 <h2 id="9-maintaining-the-kit-itself-only-in-the-ticketing-template-repo">9. Maintaining the kit itself (only in the <code>ticketing-template</code> repo)</h2>
+<p>A repo that needs MORE than the kit's hooks (its own generators, renderers, targeted
+tests, extra message rules) puts them in <code>scripts/git-hooks/pre-commit.local</code> and
+<code>scripts/git-hooks/commit-msg.local</code> — the kit's hooks call them after their own checks,
+and upgrades never touch them. After <code>.local</code> comes the clone's own <code>.git/hooks/&lt;hook&gt;</code>,
+the per-clone machine config git stopped reading when <code>core.hooksPath</code> was set; the kit
+ships a passthrough for every client hook it has no rule for (<code>post-commit</code>, <code>pre-push</code>,
+…) so those events reach <code>.local</code> and <code>.git/hooks/</code> too (KIT-031). A repo with a better decisions index sets
+<code>decisions_index = none</code>. The installer refuses to overwrite any <code>scripts/</code> file it did
+not ship (<code>KIT_FILES</code> is its manifest).</p>
 <p>The payload is <code>kit/</code>; the repo's own <code>scripts/</code> and <code>docs/</code> are an <em>installed copy</em> of
 it. After changing anything under <code>kit/</code>, re-run <code>bash install.sh .</code> so the copy the
 hooks actually execute is the new one, and bump <code>VERSION</code> in the release ticket. Every

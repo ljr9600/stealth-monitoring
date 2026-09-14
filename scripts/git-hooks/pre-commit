@@ -14,7 +14,8 @@
 set -euo pipefail
 export PYTHONDONTWRITEBYTECODE=1   # the checkers must not litter the repo (KIT-011)
 repo="$(git rev-parse --show-toplevel)"
-cfg() { sed -nE "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*(.*)$/\1/p" "$repo/docs/doc-kit.config" 2>/dev/null | head -1; }
+# A missing config means defaults (KIT-027): never let a failed sed kill the hook under set -e.
+cfg() { [ -f "$repo/docs/doc-kit.config" ] || return 0; sed -nE "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*(.*)$/\1/p" "$repo/docs/doc-kit.config" 2>/dev/null | head -1 || true; }
 TDIR="$(cfg tickets_dir)"; TDIR="${TDIR:-docs/tickets}"; TDIR="${TDIR%/}"
 staged="$(git diff --cached --name-only)"
 
@@ -44,7 +45,7 @@ if grep -qE "^${TDIR}/.*\.md$" <<<"$staged"; then
       echo "pre-commit: $chk FAILED:" >&2; sed 's/^/    /' /tmp/ticketing-template-precommit.log | tail -20 >&2; fail=1
     fi
   done
-  [ "$fail" = 0 ] || { echo "pre-commit: REJECTED — fix the ticket problems above." >&2; exit 1; }
+  [ "$fail" = 0 ] || { echo "pre-commit: work items REJECTED — fix the problems above." >&2; exit 1; }
   echo "pre-commit: tickets well-formed (shape, citations, doc impact, status)"
 fi
 # An epics repo checks its registry against the repos on every commit (KIT-018): a row's
@@ -53,10 +54,9 @@ if [ -f "$repo/.epics-root" ] && [ -f "$repo/scripts/check-scope.py" ]; then
   python3 "$repo/scripts/check-scope.py" >/tmp/ticketing-template-scope.log 2>&1 || { sed 's/^/    /' /tmp/ticketing-template-scope.log >&2; echo "pre-commit: REJECTED — the scope registry (repos.tsv) disagrees with the repos." >&2; exit 1; }
   tail -1 /tmp/ticketing-template-scope.log
 fi
-# A repo's OWN pre-commit work (generators, renderers, targeted tests) lives in
-# scripts/git-hooks/pre-commit.local and runs after the kit's checks (KIT-023). Upgrades
-# never touch it. Exit non-zero to refuse the commit.
-if [ -x "$repo/scripts/git-hooks/pre-commit.local" ]; then
-  "$repo/scripts/git-hooks/pre-commit.local" || { echo "pre-commit: REJECTED by pre-commit.local" >&2; exit 1; }
-fi
-exit 0
+# Then, in order (KIT-023, KIT-031): the repo's OWN scripts/git-hooks/pre-commit.local
+# (generators, renderers, targeted tests — versioned, never touched by an upgrade), and
+# the clone's own .git/hooks/pre-commit (machine-installed; git stopped reading it when
+# core.hooksPath was set). Either exiting non-zero refuses the commit. The order matters:
+# the stamps above are already in the ticket when a renderer downstream copies it.
+exec "$(cd "$(dirname "$0")" && pwd)/_chain.sh" pre-commit

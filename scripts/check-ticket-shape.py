@@ -107,7 +107,10 @@ def main() -> int:
         wid = fm.get("id", "").strip()
         typ = fm.get("type", "").strip().upper()
 
-        if typ and typ not in types:
+        if not typ:
+            errs.append(f"{rel}: no `type:` — a work item without a type is a note that will be "
+                        f"lost; declare one of {sorted(types)} (KIT-026).")
+        elif typ not in types:
             errs.append(f"{rel}: type '{typ}' is not one of {sorted(types)}.")
 
         ps = parents(fm, epic_field)

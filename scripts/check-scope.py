@@ -134,8 +134,9 @@ def main() -> int:
         for p in problems:
             print(f"  {p}", file=sys.stderr)
         return 1
+    more = f" (+{len(unverified) - 3} more)" if len(unverified) > 3 else ""
     print(f"scope '{scope}': {len(rows)} rows, {sum(1 for r in rows if r['prefix'])} adopted, "
-          f"{len(unverified)} unverified here" + (": " + "; ".join(unverified) if unverified else ""))
+          f"{len(unverified)} unverified here" + (": " + "; ".join(unverified[:3]) + more if unverified else ""))
     return 0
 
 

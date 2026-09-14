@@ -42,7 +42,11 @@ def entries(root: Path, cfg: dict):
     frozen = frozen_log(root, cfg)
     if frozen:
         text = frozen.read_text(encoding="utf-8", errors="replace")
-        heads = list(HEAD.finditer(text))
+        entry = re.compile(r"^##\s+(D\d+)\s*[—-]\s*(.+?)\s*$", re.M)   # entries are `## Dn` only (KIT-028)
+        heads, seen = [], set()
+        for m in entry.finditer(text):
+            if m.group(1) not in seen:
+                seen.add(m.group(1)); heads.append(m)
         for i, m in enumerate(heads):
             body = text[m.end(): heads[i + 1].start() if i + 1 < len(heads) else len(text)]
             sup = SUPERSEDED.search(body)

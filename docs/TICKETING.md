@@ -1,5 +1,7 @@
 # Ticketing — what an agent does here, step by step
 
+> **STATE: OPERATING PROCEDURE** — the procedure every repository on ticketing-template follows; the git hooks enforce it. Installed by the kit, refreshed on upgrade: edit it in the kit, not here.
+
 (Setting up a machine or a clone — cloning the kit and the epics repo, installing hooks —
 is the kit's `START-HERE.md`, not repeated here.)
 
@@ -162,6 +164,10 @@ bash scripts/epics.sh ensure            # scoped repo: clones <scope>-epics besi
 Everything else is offline. If the epics clone is missing, ordinary commits pass with a
 NOTE; creating a story that names an epic fails loudly with the clone command.
 
+Hooks the clone already had in `.git/hooks/` (a machine-installed doc check, say) are
+not switched off: every kit hook runs them after its own checks, and the installer lists
+each one it found as `kept:` (KIT-031).
+
 ## 7. When a hook refuses — what it means
 
 | the message says | do this |
@@ -199,7 +205,10 @@ visible.
 A repo that needs MORE than the kit's hooks (its own generators, renderers, targeted
 tests, extra message rules) puts them in `scripts/git-hooks/pre-commit.local` and
 `scripts/git-hooks/commit-msg.local` — the kit's hooks call them after their own checks,
-and upgrades never touch them. A repo with a better decisions index sets
+and upgrades never touch them. After `.local` comes the clone's own `.git/hooks/<hook>`,
+the per-clone machine config git stopped reading when `core.hooksPath` was set; the kit
+ships a passthrough for every client hook it has no rule for (`post-commit`, `pre-push`,
+…) so those events reach `.local` and `.git/hooks/` too (KIT-031). A repo with a better decisions index sets
 `decisions_index = none`. The installer refuses to overwrite any `scripts/` file it did
 not ship (`KIT_FILES` is its manifest).
 

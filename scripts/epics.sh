@@ -13,8 +13,9 @@ set -euo pipefail
 repo="$(git rev-parse --show-toplevel)"
 cmd="${1:-resolve}"
 
-cfg() { # <key> — one value from docs/doc-kit.config, or empty
-  sed -nE "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*(.*)$/\1/p" "$repo/docs/doc-kit.config" 2>/dev/null | head -1
+cfg() { # <key> — one value from docs/doc-kit.config, or empty (missing file = empty, KIT-027)
+  [ -f "$repo/docs/doc-kit.config" ] || return 0
+  sed -nE "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*(.*)$/\1/p" "$repo/docs/doc-kit.config" 2>/dev/null | head -1 || true
 }
 
 case "$cmd" in

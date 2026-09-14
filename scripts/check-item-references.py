@@ -141,7 +141,10 @@ def decisions_known() -> tuple[set[str], list[str]]:
             ids.setdefault(m.group(1), []).append(f.relative_to(ROOT).as_posix())
     legacy = ROOT / "docs" / "DECISIONS.md"          # a hand-written log, frozen
     if legacy.is_file():
-        for d in head.findall(legacy.read_text(encoding="utf-8", errors="replace")):
+        # One file defines each id ONCE however often it repeats the heading (restatements,
+        # `###` sub-headings under another entry) — only `## Dn` entries count (KIT-028).
+        entry = re.compile(r"^##\s+(D\d+)\s*[—-]", re.M)
+        for d in sorted(set(entry.findall(legacy.read_text(encoding="utf-8", errors="replace")))):
             ids.setdefault(d, []).append("docs/DECISIONS.md")
     dups = [f"{d} claimed by {', '.join(w)}" for d, w in ids.items() if len(w) > 1]
     return set(ids), dups

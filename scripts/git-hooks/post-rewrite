@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# ticketing-template passthrough (KIT-031): the kit has no post-rewrite rule of its own. This hands
+# the event to scripts/git-hooks/post-rewrite.local, then to the clone's own .git/hooks/post-rewrite — neither
+# of which git would run otherwise, since core.hooksPath points at this directory.
+exec "$(dirname "$0")/_chain.sh" "$(basename "$0")" "$@"

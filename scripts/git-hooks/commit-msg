@@ -22,7 +22,8 @@ msg_file="$1"
 msg="$(cat "$msg_file")"
 repo="$(git rev-parse --show-toplevel)"
 
-cfg() { sed -nE "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*(.*)$/\1/p" "$repo/docs/doc-kit.config" 2>/dev/null | head -1; }
+# A missing config means defaults (KIT-027): never let a failed sed kill the hook under set -e.
+cfg() { [ -f "$repo/docs/doc-kit.config" ] || return 0; sed -nE "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*(.*)$/\1/p" "$repo/docs/doc-kit.config" 2>/dev/null | head -1 || true; }
 TDIR="$(cfg tickets_dir)";            TDIR="${TDIR:-docs/tickets}"; TDIR="${TDIR%/}"
 DEFAULT_BRANCH="$(cfg default_branch)"; DEFAULT_BRANCH="${DEFAULT_BRANCH:-master}"
 TYPES="$(cfg work_item_types)";       TYPES="${TYPES:-EPIC STORY TASK BUG SPIKE}"
@@ -284,9 +285,7 @@ fi
 
 [ -n "$epics_note" ] && echo "  $epics_note" >&2
 [ "$bad" = 0 ] || { echo >&2; exit 1; }
-# A repo's own message rules live in scripts/git-hooks/commit-msg.local (KIT-023); it
-# receives the message file and runs after the kit's rules. Non-zero refuses the commit.
-if [ -x "$repo/scripts/git-hooks/commit-msg.local" ]; then
-  "$repo/scripts/git-hooks/commit-msg.local" "$msg_file" || exit 1
-fi
-exit 0
+# Then the repo's own scripts/git-hooks/commit-msg.local (KIT-023) and the clone's own
+# .git/hooks/commit-msg (KIT-031), in that order, each given the message file; non-zero
+# from either refuses the commit.
+exec "$(cd "$(dirname "$0")" && pwd)/_chain.sh" commit-msg "$msg_file"

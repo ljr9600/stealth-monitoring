@@ -12,6 +12,9 @@ copying one verbatim into a ticket is safe — the copy can never drift. Two mom
      the marker becomes the bare id in place, and the full text is appended under
      `## Decisions` (once). A `{{Dn}}` naming no decision refuses the commit.
 
+A merge commit copies nothing by arrival — a decision that reaches a branch by merge was
+recorded, and copied, on the branch that made it (KIT-030).
+
 Nothing is typed twice, nothing is remembered: the machine writes it at the moment it
 applies, the way it stamps times. `python3 scripts/wi.py decisions <ID>` lists what a
 ticket carries.
@@ -67,7 +70,13 @@ def main() -> int:
 
     staged = git(root, "diff", "--cached", "--name-only", "--diff-filter=AMR").splitlines()
     added = git(root, "diff", "--cached", "--name-only", "--diff-filter=A").splitlines()
-    new_decisions = [p for p in added if p.startswith(ddir + "/") and re.match(r"D\d+-.*\.md$", Path(p).name)]
+    # A merge commit brings decisions recorded on OTHER branches, each already copied into
+    # its own ticket where it was made. They were not recorded while working THIS item, so
+    # moment 1 does not apply to a merge (KIT-030); moment 2 (markers) still does.
+    mh = git(root, "rev-parse", "--git-path", "MERGE_HEAD").strip()
+    merging = bool(mh) and (Path(mh) if Path(mh).is_absolute() else root / mh).exists()
+    new_decisions = [] if merging else [
+        p for p in added if p.startswith(ddir + "/") and re.match(r"D\d+-.*\.md$", Path(p).name)]
 
     # the tickets this commit is ABOUT: the branch's item, plus every staged ticket
     targets: dict[Path, bool] = {}     # path -> is it staged (marker expansion applies)
