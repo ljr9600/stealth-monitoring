@@ -27,15 +27,26 @@ from doc_kit import load_config  # noqa: E402
 SKIP_DIRS = {".git", "node_modules", "target", "vendor", ".claude", "__pycache__", "closed"}
 
 
+COLUMNS = ["repo", "path", "remote", "story_prefix"]   # the order when there is no header row
+
+
 def read_tsv(path: Path):
-    rows = []
+    """Rows keyed by the header's column names (KIT-059), so optional columns such as
+    `retired_prefixes` can be added in any order; a file without a header reads by position.
+    Every row gets `retired_col` — whether the registry records retired prefixes at all."""
+    rows, cols = [], COLUMNS
     for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-        if not line.strip() or line.startswith("#") or line.startswith("repo\t"):
+        if not line.strip() or line.startswith("#"):
             continue
-        cells = line.split("\t")
-        cells += [""] * (4 - len(cells))
-        rows.append({"repo": cells[0].strip(), "path": cells[1].strip(), "remote": cells[2].strip(),
-                     "prefix": cells[3].strip()})
+        cells = [c.strip() for c in line.split("\t")]
+        if cells[0] == "repo":                      # the header row names the columns
+            cols = cells
+            continue
+        cells += [""] * (len(cols) - len(cells))
+        d = dict(zip(cols, cells))
+        rows.append({**d, "repo": d.get("repo", ""), "path": d.get("path", ""), "remote": d.get("remote", ""),
+                     "prefix": d.get("story_prefix", ""), "retired": d.get("retired_prefixes", ""),
+                     "retired_col": "retired_prefixes" in cols})
     return rows
 
 
@@ -101,7 +112,7 @@ def main() -> int:
     problems, unverified = [], []
     seen: dict[str, str] = {}
     for r in rows:
-        for p in r["prefix"].split():
+        for p in r["prefix"].split() + r["retired"].split():   # a retired prefix is still owned (KIT-059)
             if p in seen:
                 problems.append(f"prefix {p} is claimed by both {seen[p]} and {r['repo']} (repos.tsv)")
             seen[p] = r["repo"]
@@ -118,6 +129,15 @@ def main() -> int:
         if rowp and declared != rowp:
             problems.append(f"{r['repo']}: repos.tsv says prefix {' '.join(sorted(rowp)) or '(none)'} "
                             f"but the repo declares {' '.join(sorted(declared)) or '(none)'} — fix one")
+        retired = set(cfg.get("retired_prefixes", "").split())
+        rowr = set(r["retired"].split())
+        if retired & declared:
+            problems.append(f"{r['repo']}: prefix {' '.join(sorted(retired & declared))} is both declared "
+                            f"and retired in its docs/doc-kit.config")
+        if rowr != retired and (r["retired_col"] or retired):
+            problems.append(f"{r['repo']}: repos.tsv retires {' '.join(sorted(rowr)) or '(none)'} but the "
+                            f"repo retires {' '.join(sorted(retired)) or '(none)'} — fix one"
+                            + ("" if r["retired_col"] else " (add a retired_prefixes column to the header)"))
         if not rowp and declared:
             problems.append(f"{r['repo']}: the repo declares {' '.join(sorted(declared))} but its repos.tsv row has no prefix")
         if cfg.get("epics_scope", "").strip() != scope:

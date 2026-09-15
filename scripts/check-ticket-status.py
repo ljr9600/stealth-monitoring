@@ -23,7 +23,13 @@ Three things, each of which has actually been wrong in this repository:
    until DOCS-026 retrofits the backlog (D403: never wire a knowingly-red
    check); DOCS-026's close adds the flag to the gate line.
 
-7. TIME STAMPS (GOV-005): every item carries a machine-stamped `created:`;
+7. REOPENS (KIT-054, D24): an OPEN or BLOCKED item carries no `closed:`/
+   `closer:` -- a reopen that leaves them set makes the item claim both states
+   at once, and because stamps are never overwritten the eventual re-close then
+   credits the actor whose close did not hold. `reopened: n` must agree with the
+   number of `## Reopen history` entries, so the count cannot drift from the
+   evidence behind it.
+8. TIME STAMPS (GOV-005): every item carries a machine-stamped `created:`;
    a closed item carries `started:` and `closed:` too; all in 'YYYY-MM-DD
    HH:MM ET' and in chronological order. The stamps are written by
    scripts/stamp-ticket-times.py at the moment of the event -- a missing or
@@ -39,6 +45,8 @@ from datetime import datetime
 from pathlib import Path
 
 ENUM = {"OPEN", "BLOCKED", "CLOSED"}
+REOPEN_ENTRY = re.compile(r"^- \*\*Reopen (\d+)\*\*", re.M)
+REOPEN_CMD = 'python3 scripts/wi.py reopen <ID> "<why the close did not hold>"'
 STAMP = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2} ET$")
 BACKFILL = "python3 scripts/stamp-ticket-times.py --backfill"
 
@@ -73,6 +81,34 @@ def time_problems(name: str, fm: dict, is_closed: bool) -> list:
             out.append(
                 f"{name}: times are out of order — {fa} '{fm[fa]}' is after closed '{fm['closed']}' (GOV-005).\n"
                 f"    A stamp is never edited; delete the wrong one and run {BACKFILL}")
+    return out
+
+
+def reopen_problems(name: str, fm: dict, is_closed: bool) -> list:
+    """KIT-054: a reopen leaves the item consistent, and its count matches its evidence."""
+    out = []
+    if not is_closed:
+        for field in ("closed", "closer"):
+            if fm.get(field, "").strip():
+                out.append(
+                    f"{name}: status is {fm.get('status', '?')} but '{field}:' is still set "
+                    f"('{fm[field].strip()}').\n"
+                    f"    An item cannot be open and closed at once, and a stamp is never\n"
+                    f"    overwritten — leaving this here makes the NEXT close credit the actor\n"
+                    f"    whose close did not hold (D24).\n"
+                    f"    Fix: reopen it properly — {REOPEN_CMD}\n"
+                    f"    (or, if it is closed, git mv it under closed/)")
+    count = fm.get("reopened", "").strip()
+    entries = REOPEN_ENTRY.findall(fm["_body"])
+    if count and not count.isdigit():
+        out.append(f"{name}: 'reopened:' must be a whole number (got '{count}').\n"
+                   f"    It is written by {REOPEN_CMD}, never by hand.")
+    elif (int(count) if count.isdigit() else 0) != len(entries):
+        out.append(
+            f"{name}: 'reopened: {count or 0}' but '## Reopen history' has {len(entries)} "
+            f"entr{'y' if len(entries) == 1 else 'ies'}.\n"
+            f"    The count is only useful while it matches the record behind it (KIT-054).\n"
+            f"    Fix: reopen through {REOPEN_CMD} so both are written together.")
     return out
 
 
@@ -122,6 +158,7 @@ def main() -> int:
         status = fm.get("status", "")
         problems.extend(time_problems(f.name, fm, is_closed=False))
         problems.extend(actor_problems(f.name, fm, is_closed=False))
+        problems.extend(reopen_problems(f.name, fm, is_closed=False))
         if status not in ENUM:
             problems.append(
                 f"{f.name}: status '{status}' is not one of OPEN|BLOCKED|CLOSED.\n"
@@ -174,6 +211,7 @@ def main() -> int:
             status = fm.get("status", "")
             problems.extend(time_problems(f"closed/{f.name}", fm, is_closed=True))
             problems.extend(actor_problems(f"closed/{f.name}", fm, is_closed=True))
+            problems.extend(reopen_problems(f"closed/{f.name}", fm, is_closed=True))
             if status != "CLOSED":
                 problems.append(
                     f"closed/{f.name}: in closed/ but says 'status: {status}' — the board believes\n"

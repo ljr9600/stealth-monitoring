@@ -7,10 +7,15 @@
 create → push → branch → work → close → merge, and epics. The git hooks enforce it and
 print the fixing command when you break a rule.
 
-- This repo's ticket prefix(es): `MONIT`. Epics scope: `stealth`.
+- This repo's ticket prefix(es): `MONITORING`. Epics scope: `stealth`.
 - Board: `python3 scripts/wi.py` · new item: `python3 scripts/wi.py new <PFX>-NNN <TYPE> "<title>"`
 - One ticket creation per commit, on master, **pushed before you branch**; every commit's
   subject names its item; work never lands on master directly.
+- **Before any external change** (publish, deploy, restart, remote file change, or container
+  change), the work must already have an open ticket on `origin/master`, the active branch
+  must be named for that ticket, and the required checks must pass. If the change is found
+  after an un-ticketed action, stop, report the process violation, and file a corrective
+  ticket before doing anything else.
 - Set `TICKETING_ACTOR=Claude` for Claude or `TICKETING_ACTOR=Codex` for Codex before
    creating or working on tickets. The shared procedure covers Git worktrees; read it
    before using one.

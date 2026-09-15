@@ -59,11 +59,11 @@ ticket first** — nothing is too small for a TASK.
 
 ```bash
 git switch master && git pull -q
-python3 scripts/wi.py new MDAPI-012 STORY "Serve-time split adjustment" --area marketdata --epic MKTD-003
-#   → docs/tickets/MDAPI-012-serve-time-split-adjustment.md   (from docs/templates/ticket-STORY.md)
-$EDITOR docs/tickets/MDAPI-012-*.md       # fill the contract (below)
-git add docs/tickets/MDAPI-012-*.md
-git commit -m "MDAPI-012: file — Serve-time split adjustment (ticket creation)"
+python3 scripts/wi.py new MARKETDATA_API-012 STORY "Serve-time split adjustment" --area marketdata --epic STEALTH-012
+#   → docs/tickets/MARKETDATA_API-012-serve-time-split-adjustment.md   (from docs/templates/ticket-STORY.md)
+$EDITOR docs/tickets/MARKETDATA_API-012-*.md       # fill the contract (below)
+git add docs/tickets/MARKETDATA_API-012-*.md
+git commit -m "MARKETDATA_API-012: file — Serve-time split adjustment (ticket creation)"
 git push                                  # BEFORE branching: the hooks check origin/master
 ```
 
@@ -88,10 +88,61 @@ Rules the hooks apply at this moment:
 - **The id is `PREFIX-NNN`**, and the prefix must be declared in `docs/doc-kit.config`
   (`prefixes =`) or already in use. Anything else id-shaped (`SHA-256`, `ADR-007`) is
   prose, not a ticket — and words like `API`, `SHA`, `RFC`, `TLS` can never be prefixes
-  (`prefix_denylist`). Choosing one: 2–10 capitals, unique across the scope; in a
-  multi-repo scope **one prefix per repo**, derived from the repo name (`marketdata-api →
-  MDAPI`, `uw-flow-indexer → UWFI`); in a single-repo product, one prefix per area
-  (open-teleporter's `HOST`, `RFB`, `SEC`). Don't mix the two conventions in one scope.
+  (`prefix_denylist`). Choosing one: 2–24 characters, capital letters with whole words
+  joined by single underscores, unique across the scope (KIT-057). **Spell words out**:
+  the people reading the board should never have to decode an abbreviation. In a
+  multi-repo scope, use **one prefix per repo**, the repo's name in words
+  (`marketdata-api → MARKETDATA_API`, `uw-flow-indexer → UW_FLOW_INDEXER`). A scope may
+  pin the exact transformation in a decision in its epics repo. In a single-repo
+  product, use one prefix per area (open-teleporter's `HOST`, `RFB`). Don't mix the two
+  conventions in one scope. Older 2–10 letter prefixes stay valid.
+- **Renaming a prefix.** An id can never change, because it is written into pushed
+  commits. So a renamed prefix is **retired**, not removed (KIT-059). Put the new prefix
+  in `prefixes =` and move the old one to `retired_prefixes =`. In a scope, update the
+  repository's `repos.tsv` row in the epics repo in the same change (`story_prefix`, and a
+  `retired_prefixes` column). Old tickets keep their ids and can still be worked, cited and
+  closed. `wi.py new` refuses the old prefix, and new numbers continue past its highest one:
+
+  ```
+  prefixes         = TWITTER_SCRAPER
+  retired_prefixes = TWSCR     # TWSCR-001…020 stay valid; the next new id is TWITTER_SCRAPER-021
+  ```
+- **Areas and tags** (KIT-060). `area:` is exactly one word naming the lasting part of the
+  system a ticket concerns; the board groups by it. `tags:` holds none or several words,
+  comma-separated, naming topics that cut across repos: a feed, production, an incident.
+  When the project keeps word lists (`vocabulary/areas.tsv`, `vocabulary/tags.tsv`), both
+  must come from them. In a scoped repo those lists are the scope's, kept in
+  `<scope>-epics` and read at `origin` like epics. Run `python3 scripts/wi.py words`, pick
+  a word (a listed synonym tells you which word to use), and pass `--area` / `--tags` to
+  `wi.py new`. The hooks refuse anything else on a ticket whose area or tags you set or
+  change. An old ticket keeping an old word is left alone.
+
+  **Adding a word is yours to decide; nobody approves it.** The rules:
+  1. If an existing word or one of its synonyms covers the idea, use it. Never add a
+     plural, a variant or an abbreviation of a word that is already there.
+  2. An area names a lasting part of the system that more than one ticket will concern. A
+     topic that concerns just one ticket is a tag, or nothing.
+  3. Lowercase whole words joined by `-`, at most 20 characters. Acronyms only if the
+     codebase already uses them (`api`, `ui`). Never `misc`, `other`, `general` or
+     `various`.
+  4. Add a row with `word`, a one-line `meaning` a person understands, `synonyms`,
+     `added`, `first_ticket` (the ticket you are about to file), `reason`. Commit it alone,
+     as `words: add <word> (<area|tag>) — <why>`, on the default branch of the repo that
+     holds the lists, and push. Then file the ticket.
+  5. Never delete a row. To replace a word, set its `merged_into` to the word that
+     replaces it. Old tickets then read as the new word, and no ticket file changes.
+
+  ```
+  word	meaning	synonyms	added	first_ticket	reason	merged_into
+  security	who may do what, and secrets	sec, tls, auth	2026-09-15	-	starter list
+  backtesting	replaying past market data to test a strategy		2026-09-16	QUANT_LAB-001	no area covered it
+  ```
+
+  On the board, a ticket shows under the live word: a merged word reads as its successor and
+  a synonym as its word. Tags get their own pages, and new words appear under "Words added
+  this week". A many-repository board can also group repositories by domain (a `domain`
+  column in `repos.tsv`) and lead each row with the title (`row_style = title-first`), with
+  the ID in small type at the end (KIT-061).
 - **The type is one of** `EPIC STORY TASK BUG SPIKE`, chosen by what *closing* needs:
 
   | type | closes when |
@@ -140,12 +191,12 @@ before continuing. This is discovery-and-retry, not a locking system.
 ## 3. Work — on a branch named for the item
 
 ```bash
-git switch -c story/MDAPI-012            # story/ bug/ task/ spike/ — exactly one item per branch
+git switch -c story/MARKETDATA_API-012            # story/ bug/ task/ spike/ — exactly one item per branch
 ... edit, test ...
-git commit -m "MDAPI-012: adjust at serve time, not at ingest
+git commit -m "MARKETDATA_API-012: adjust at serve time, not at ingest
 
-Follows the approach settled in MKTD-003; supersedes MDAPI-004."
-git push -u origin story/MDAPI-012
+Follows the approach settled in STEALTH-012; supersedes MARKETDATA_API-004."
+git push -u origin story/MARKETDATA_API-012
 ```
 
 - **Every commit's subject names the branch's item.** Other items go in the body —
@@ -171,18 +222,58 @@ believe that this change made false?* Fix each of those documents **in the closi
 commit** — the Documentation impact section is executed, not declared.
 
 ```bash
-sed -i 's/^status:.*$/status:     CLOSED/' docs/tickets/MDAPI-012-*.md
-git mv docs/tickets/MDAPI-012-*.md docs/tickets/closed/
+sed -i 's/^status:.*$/status:     CLOSED/' docs/tickets/MARKETDATA_API-012-*.md
+git mv docs/tickets/MARKETDATA_API-012-*.md docs/tickets/closed/
 git add <the documents the impact section named>
-git commit -m "MDAPI-012: serve-time adjustment, docs updated (closes)"
+git commit -m "MARKETDATA_API-012: serve-time adjustment, docs updated (closes)"
 bash tests/…                             # the repo's gate, green
-git switch master && git merge --no-ff story/MDAPI-012 && git push
-git branch -d story/MDAPI-012
+git switch master && git merge --no-ff story/MARKETDATA_API-012 && git push
+git branch -d story/MARKETDATA_API-012
 ```
 
 The hook stamps `closed:` (and repairs a missing `started:`) when the file is staged
-under `closed/`. Status is `OPEN | BLOCKED | CLOSED` — "in progress" is derived from
+under `closed/`. If the close turns out to be wrong, reverse it with section 4a's
+`wi.py reopen` — never by hand. Status is `OPEN | BLOCKED | CLOSED` — "in progress" is derived from
 commits, never written.
+
+## 4a. Reopen — when a close did not hold
+
+A close is the only lifecycle event with no reviewer, so reversing one leaves evidence
+rather than quietly undoing itself:
+
+```bash
+python3 scripts/wi.py reopen MARKETDATA_API-012 "the healthcheck was never run in a container"
+git switch -c bug/MARKETDATA_API-012            # a reopen is WORK, not a creation — it needs a branch
+git add docs/tickets/MARKETDATA_API-012-*.md
+git commit -m "MARKETDATA_API-012: reopen — the close did not hold"
+git push -u origin bug/MARKETDATA_API-012
+```
+
+The branch step is not optional: the default branch takes merges, reverts, ticket *creations*
+and the configured machine commits, and a reopen is none of those. (If the item's old branch
+still exists from the close that did not hold, `git branch -d <type>/<ID>` it first — it is
+merged.)
+
+It moves the file back out of `closed/`, sets `status: OPEN`, increments `reopened:`, and
+appends one entry to an append-only `## Reopen history`:
+
+```
+- **Reopen 1** — 2026-09-15 09:12 ET — reopened by Claude — reverses the close of
+  2026-09-15 08:12 ET by Codex — the healthcheck was never run in a container
+```
+
+The superseded `closed:`/`closer:` MOVE into that entry and are cleared from the front
+matter. That is deliberate (D24): stamps are never overwritten, so leaving them would make
+the eventual re-close credit the actor whose close did not hold, and hide the one who
+actually fixed it. Nothing is lost — the old close is in the history entry, permanently.
+
+The gate enforces both halves: an OPEN or BLOCKED item carrying `closed:` or `closer:` is
+refused, and `reopened: n` must equal the number of `## Reopen history` entries. Reopening
+by hand trips one of those; use the command. `python3 scripts/wi.py` marks a returning item
+`[reopened xN]` on the board, so an item that keeps coming back cannot look like a fresh one.
+
+Then work it like any other open item (section 3) and close it again (section 4) — the
+second close stamps the real closer, because the first one is no longer in the way.
 
 ## 5. Epics — work that spans repositories
 
@@ -193,8 +284,8 @@ lives; the epic lives in the scope's epics repo.
 ```bash
 cd ~/dev/stealth-epics                      # the epics repo for scope "stealth"
 git pull -q
-python3 scripts/wi.py new MKTD-003 EPIC "Split adjustment across the market-data stack"
-git add docs/tickets && git commit -m "MKTD-003: file — Split adjustment across the market-data stack (ticket creation)"
+python3 scripts/wi.py new STEALTH-012 EPIC "Split adjustment across the market-data stack"
+git add docs/tickets && git commit -m "STEALTH-012: file — Split adjustment across the market-data stack (ticket creation)"
 git push                                    # an epic exists for others ONLY at origin/master
 ```
 
@@ -237,7 +328,7 @@ each one it found as `kept:` (KIT-031).
 | this branch belongs to X | the subject must name X; other items go in the body |
 | has no ticket on origin/master yet | create the ticket on master, commit, **push**, come back |
 | ticket ID already exists or push is non-fast-forward | fetch again, inspect the remote, choose the next free ID, reconcile any unpushed local ticket, then retry |
-| is CLOSED | reopen it or open a new item — unless this commit is the close (stage the move) |
+| is CLOSED | `wi.py reopen <ID> "<why>"` (section 4a) or open a new item — unless this commit is the close (stage the move) |
 | is an EPIC, a tracking parent | commit against one of its stories; cite the epic in the body |
 | cited in the body but does not exist | file it, or fix the id — a name that looks tracked and isn't is the worst case |
 | names an epic that does not exist | create the epic in the epics repo, **push**, then retry |

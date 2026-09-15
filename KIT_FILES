@@ -3,6 +3,7 @@ scripts/check-item-references.py
 scripts/check-scope.py
 scripts/check-ticket-shape.py
 scripts/check-ticket-status.py
+scripts/check-vocabulary.py
 scripts/decisions-index.py
 scripts/decisions-into-tickets.py
 scripts/doc_kit.py

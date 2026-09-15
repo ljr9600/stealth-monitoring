@@ -25,8 +25,13 @@ to `root`:
     # optional: a scope registry (repos.tsv) — every row is a member
     registry = ../repos.tsv
     # optional, repeatable: a member repository, named after its origin remote
-    # (or explicitly: repo = PATH | NAME)
+    # (or explicitly: repo = PATH | NAME, and optionally its domain: repo = PATH | NAME | DOMAIN)
     repo     = .
+    # optional (KIT-061): group repositories into domains on the home page — a `domain`
+    # column in the registry (read by header name), or the third field of a `repo =` line
+    # optional (KIT-061): rows lead with the title and say where the ticket lives; the id
+    # goes last in small type (default: id-first, as before)
+    row_style = title-first
     # optional, repeatable: another project's board — a plain link, nothing read from it
     board    = Open Teleporter | http://192.168.1.40:8099/
     # optional: shown in the footer
@@ -48,9 +53,9 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from doc_kit import parse_config_text, item_state, ITEM_BRANCH_RE  # noqa: E402
+from doc_kit import parse_config_text, item_state, ITEM_BRANCH_RE, ID_RE as _ID, vocab_map  # noqa: E402
 
-ID_RE = re.compile(r"\b([A-Z]{2,10}-\d{3})\b")
+ID_RE = re.compile(r"\b(" + _ID + r")\b")
 FM_RE = re.compile(r"^---\n(.*?)\n---\n?(.*)$", re.S)
 STAMP_RE = re.compile(r"(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2}))?")
 e = lambda s: html.escape(str(s if s is not None else ""), quote=True)
@@ -77,25 +82,34 @@ def load_board_config(path: Path) -> dict:
     root = rel(cfg.get("root") or ".")
     members = []
     if cfg.get("registry"):
-        # a scope registry (repos.tsv): `repo <TAB> path-relative-to-root [<TAB> …]`; every row belongs
+        # a scope registry (repos.tsv), every row a member. Read by the header's column names
+        # (KIT-061): `repo`, `path`, and optionally `domain`; without a header, by position.
+        cols = ["repo", "path"]
         for row in rel(cfg["registry"]).read_text(encoding="utf-8").splitlines():
-            if not row.strip() or row.startswith("#") or row.startswith("repo\t"):
+            if not row.strip() or row.startswith("#"):
                 continue
-            cols = row.split("\t")
-            if len(cols) >= 2:
-                members.append((cols[0], (root / cols[1]).resolve()))
+            cells = [c.strip() for c in row.split("\t")]
+            if cells[0] == "repo":
+                cols = [c.lower() for c in cells]
+                continue
+            d = dict(zip(cols, cells))
+            if d.get("path"):
+                members.append((d.get("repo") or None, (root / d["path"]).resolve(), d.get("domain", "")))
     for r in repos:
-        path, _, nm = (x.strip() for x in r.partition("|"))
-        members.append((nm or None, (root / os.path.expanduser(path)).resolve()))
-    seen, out = set(), []
-    for name, p in members:
+        parts = [x.strip() for x in r.split("|")] + ["", ""]
+        members.append((parts[1] or None, (root / os.path.expanduser(parts[0])).resolve(), parts[2]))
+    seen, out = {}, []
+    for name, p, dom in members:
         if p in seen:
+            if dom and not seen[p]["domain"]:
+                seen[p]["domain"] = dom
             continue
-        seen.add(p)
-        out.append({"name": name or origin_name(p) or p.name, "path": p})
+        seen[p] = {"name": name or origin_name(p) or p.name, "path": p, "domain": dom}
+        out.append(seen[p])
     return {"name": cfg.get("name", "Board"), "out": str(rel(cfg["out"]).resolve()) if cfg.get("out") else "",
             "refresh": cfg.get("refresh", ""), "repos": out, "boards": boards,
-            "publish": cfg.get("publish", ""), "portal": cfg.get("portal", "")}
+            "publish": cfg.get("publish", ""), "portal": cfg.get("portal", ""),
+            "row_style": (cfg.get("row_style") or "id-first").strip()}
 
 
 def origin_name(p: Path) -> str:
@@ -146,9 +160,11 @@ def parse_ticket(text: str, path: str) -> dict | None:
     status = fm.get("status", "").upper() or ("CLOSED" if "/closed/" in path else "OPEN")
     return {"id": fm["id"], "title": fm.get("title", ""), "type": (fm.get("type") or "").upper(),
             "status": status, "priority": (fm.get("priority") or "P3").upper(), "area": fm.get("area", ""),
+            "tags": list(dict.fromkeys(x for x in re.split(r"[,\s]+", fm.get("tags", "")) if x)),
             "epic": fm.get("epic", ""), "estimate": fm.get("estimate", ""),
             "created": fm.get("created") or fm.get("opened", ""), "started": fm.get("started", ""),
             "closed": fm.get("closed", ""), "summary": summary,
+            "reopened": int(fm["reopened"]) if fm.get("reopened", "").strip().isdigit() else 0,
             "sections": sections,
             "cites": sorted(set(re.findall(r"\bD\d+\b", body)), key=lambda d: int(d[1:])), "path": path}
 
@@ -165,8 +181,8 @@ def inline_md(raw: str) -> str:
     value = re.sub(r"`([^`]+)`", lambda m: hold(f'<code>{m.group(1)}</code>'), value)
     value = re.sub(r"\[([^]]+)\]\((https?://[^\s)]+|mailto:[^\s)]+)\)",
                    lambda m: hold(f'<a href="{m.group(2)}">{m.group(1)}</a>'), value)
-    value = re.sub(r"\*\*([^*]+)\*\*|__([^_]+)__", lambda m: f"<strong>{m.group(1) or m.group(2)}</strong>", value)
-    value = re.sub(r"(?<!\*)\*([^*]+)\*(?!\*)|(?<!_)_([^_]+)_(?!_)", lambda m: f"<em>{m.group(1) or m.group(2)}</em>", value)
+    value = re.sub(r"\*\*([^*]+)\*\*|(?<!\w)__([^_]+)__(?!\w)", lambda m: f"<strong>{m.group(1) or m.group(2)}</strong>", value)
+    value = re.sub(r"(?<!\*)\*([^*]+)\*(?!\*)|(?<!\w)_([^_]+)_(?!\w)", lambda m: f"<em>{m.group(1) or m.group(2)}</em>", value)
     return re.sub(r"\x00(\d+)\x00", lambda m: protected[int(m.group(1))], value)
 
 
@@ -234,6 +250,9 @@ def read_repo(name: str, path: Path, fetch: bool) -> dict:
     ref = f"origin/{branch}"
     rec.update(adopted=bool(cfg_text), prefix=conf.get("prefixes", ""), branch=branch,
                head=git(path, "log", "-1", "--format=%cI", ref).strip()[:16].replace("T", " "))
+    vdir = (conf.get("vocabulary_dir") or "vocabulary").strip().strip("/") or "vocabulary"
+    rec["vocab"] = {k: git(path, "show", f"{ref}:{vdir}/{k}.tsv") for k in ("areas", "tags")}   # KIT-061
+    rec["epics_repo"] = bool(git(path, "show", f"{ref}:.epics-root"))
     tdir = conf.get("tickets_dir", "docs/tickets").rstrip("/")
     ddir = conf.get("decisions_dir", "docs/decisions").rstrip("/")
     frozen = conf.get("decisions_frozen") or "docs/DECISIONS.md"
@@ -241,7 +260,7 @@ def read_repo(name: str, path: Path, fetch: bool) -> dict:
     branches = {m.group(1) for line in git(path, "for-each-ref", "--format=%(refname:short)", "refs/remotes/origin").splitlines()
                 if (m := ITEM_BRANCH_RE.search(line))}
     for f in files:
-        if f.startswith(tdir + "/") and f.endswith(".md") and re.search(r"/[A-Z]{2,10}-\d{3}-[^/]*\.md$", f):
+        if f.startswith(tdir + "/") and f.endswith(".md") and re.search("/" + _ID + r"-[^/]*\.md$", f):
             t = parse_ticket(git(path, "show", f"{ref}:{f}"), f)
             if t:
                 t["branch"] = t["id"] in branches
@@ -288,6 +307,46 @@ class Model:
         self.unset = [r for r in repos if not r["adopted"]]
         self.by_name = {r["name"]: r for r in repos}
         self.built = now.isoformat(timespec="minutes") + tzoffset()
+        # KIT-061. Domains: opt-in, from the registry's `domain` column or a `repo =` line.
+        self.has_domains = any(r.get("domain") for r in repos)
+        self.domains: dict[str, list] = defaultdict(list)
+        for r in repos:
+            self.domains[r.get("domain") or "Other"].append(r)
+        self.title_first = conf.get("row_style", "") == "title-first"
+        # The word lists (KIT-060) at origin: the scope's epics repo first, else any repo's own.
+        self.vocab: dict[str, dict] = {}
+        for r in sorted(repos, key=lambda r: not r.get("epics_repo")):
+            for kind, text in (r.get("vocab") or {}).items():
+                if text and kind not in self.vocab:
+                    self.vocab[kind] = vocab_map(text)
+        for r in repos:
+            for tk in r["tickets"]:
+                tk["area_raw"] = tk["area"]
+                tk["area"] = self.canon("areas", tk["area"])
+                tk["tags"] = list(dict.fromkeys(self.canon("tags", x) for x in tk.get("tags", [])))
+        self.new_words = []
+        for kind, rows in self.vocab.items():
+            for w, row in rows.items():
+                d = stamp(row.get("added", ""))
+                if d and 0 <= (now.date() - d.date()).days <= 7:   # calendar days: a word added today counts all day
+                    self.new_words.append((d, kind, w, row))
+        self.new_words.sort(key=lambda x: x[0], reverse=True)
+
+    def canon(self, kind: str, w: str) -> str:
+        """The live word a ticket's area/tag reads as: a merged word shows its successor, a
+        synonym its word; an unlisted word shows as it is. The ticket file never changes."""
+        rows = self.vocab.get(kind) or {}
+        if not w or not rows:
+            return w
+        if w in rows:
+            return rows[w].get("merged_into") or w
+        for word, row in rows.items():
+            if w in row["synonyms"]:
+                return row.get("merged_into") or word
+        return w
+
+    def dom(self, r) -> str:
+        return r.get("domain") or "Other"
 
     def events(self):
         ev = []
@@ -399,6 +458,25 @@ class Site:
     def p_area(self, r, a):
         return f"r/{slug(r['name'])}/area-{slug(a)}.html"
 
+    def p_domain(self, d):
+        return f"d/{slug(d)}.html"
+
+    def p_tag(self, tag):
+        return f"tag/{slug(tag)}.html"
+
+    def where(self, r, plain=False):
+        """`Domain › repository` for a title-first row (KIT-061); the repo alone without domains."""
+        if self.m.single:
+            return ""
+        if plain:
+            return (f"{self.m.dom(r)} › " if self.m.has_domains else "") + r["name"]
+        d = f'<b>{e(self.m.dom(r))}</b><span class="sep">›</span>' if self.m.has_domains else ""
+        return f'<span class="where">{d}<span>{e(r["name"])}</span></span>'
+
+    def repo_note(self, r):
+        """The repository name callers add to an id-first row on a many-repo page."""
+        return "" if self.m.single or self.m.title_first else f"<span>{e(r['name'])}</span><span>·</span>"
+
     def pill(self, s):
         return f'<span class="st {s}">{LABEL[s]}</span>'
 
@@ -412,10 +490,18 @@ class Site:
         now = self.m.now
         age = (f"started {ago(now, t['_s'])}" if t["state"] == "in-progress" else
                f"closed {ago(now, t['_x'])}" if t["state"] == "closed" else f"opened {ago(now, t['_c'])}")
+        tags = "".join(f'<span class="tagchip">{e(x)}</span>' for x in t.get("tags", []))
+        if self.m.title_first:   # KIT-061: what it is, then where it lives; the id last, small
+            area = f'<span class="areachip">{e(t["area"])}</span>' if t["area"] else ""
+            return (f'<a class="row tf" href="{self.rel(page, self.p_ticket(r, t))}">'
+                    f'<span class="t">{e(t["title"])}</span><span class="meta">{self.pri(t)}{self.typ(t)}</span>'
+                    f'<span class="sub2">{extra}{self.where(r)}{area}{tags}<span>{age}</span>'
+                    f'<span class="fid">{e(t["id"])}</span></span></a>')
         area = f"<span>{e(t['area'])}</span><span>·</span>" if t["area"] else ""
+        tags = f"{tags}<span>·</span>" if tags else ""
         return (f'<a class="row" href="{self.rel(page, self.p_ticket(r, t))}"><span class="id">{e(t["id"])}</span>'
                 f'<span class="t">{e(t["title"])}</span><span class="meta">{self.pri(t)}{self.typ(t)}</span>'
-                f'<span class="sub2">{extra}{area}<span>{age}</span></span></a>')
+                f'<span class="sub2">{extra}{area}{tags}<span>{age}</span></span></a>')
 
     def frame(self, page: str, title: str, nav: str, body: str) -> str:
         m, R = self.m, lambda to: self.rel(page, to)
@@ -438,10 +524,18 @@ class Site:
                   + '</div></details>'
                   if (m.conf["boards"] or m.conf["portal"]) else
                   f'<div class="proj"><span class="proj-k">Project</span><span class="proj-v">{e(m.conf["name"])}</span></div>')
+        opt = lambda r: f'<option value="{R(self.p_repo(r))}">{e(r["name"])}{f" ({len(r["tickets"])})" if r["tickets"] else ""}</option>'
+        order = [*m.active, *m.quiet, *m.unset]
+        if m.has_domains:   # KIT-061: grouped by domain
+            opts = "".join(f'<optgroup label="{e(d)}">' + "".join(opt(r) for r in order if m.dom(r) == d) + "</optgroup>"
+                           for d in sorted(m.domains, key=lambda d: (d == "Other", d.lower())))
+        else:
+            opts = "".join(opt(r) for r in order)
         jump = "" if m.single else (
-            '<select class="jump" id="jump" aria-label="Go to a repository"><option value="">Go to repository…</option>' +
-            "".join(f'<option value="{R(self.p_repo(r))}">{e(r["name"])}{f" ({len(r["tickets"])})" if r["tickets"] else ""}</option>'
-                    for r in [*m.active, *m.quiet, *m.unset]) + "</select>")
+            '<select class="jump" id="jump" aria-label="Go to a repository"><option value="">Go to repository…</option>' + opts + "</select>")
+        lookup = ('<form class="lookup" id="ticket-lookup"><label for="ticket-id">Find ticket</label>'
+                  '<input id="ticket-id" placeholder="UOASIG-008" autocomplete="off" spellcheck="false">'
+                  '<button type="submit">Find</button></form><div id="ticket-results" role="status"></div>')
         themes = ("current", "Jira", "Linear", "GitHub Issues", "GitLab", "Azure DevOps")
         theme = ('<label class="theme-choice" for="theme"><span>Theme</span><select id="theme" aria-label="Choose board theme">' +
                  "".join(f'<option value="{slug(label)}">{e(label)}</option>' for label in themes) + '</select></label>')
@@ -451,7 +545,7 @@ class Site:
                 f'<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link rel="stylesheet" href="{e(FONTS)}">'
                 f'<link rel="stylesheet" href="{R("board.css")}"></head><body>'
                 f'<header class="top"><div class="top-in">{switch}<nav class="nav" aria-label="Board sections">{navhtml}</nav>{jump}{theme}</div></header>'
-                f'<main class="wrap">{body}</main>'
+                f'<main class="wrap">{lookup}{body}</main>'
                 f'<footer class="foot">Built {at(m.now)} from each repository\'s <span class="mono">origin</span>'
                 f'{(" · refreshed " + e(m.conf["refresh"])) if m.conf["refresh"] else ""}</footer>'
                 f'<script src="{R("board.js")}"></script></body></html>')
@@ -503,16 +597,26 @@ class Site:
         att = self.attention()
         shown = att[:8]
         att_html = ('<div class="rows">' + "".join(
-            self.row(page, r, t, f'<span class="reason {w}">{e(lab)}</span>' + ("" if m.single else f"<span>{e(r['name'])}</span><span>·</span>"))
+            self.row(page, r, t, f'<span class="reason {w}">{e(lab)}</span>' + self.repo_note(r))
             for _, r, t, w, lab in shown) + "</div>" +
             (f'<div class="empty">+ {len(att) - len(shown)} more — see the {"areas" if m.single else "repositories"} below</div>' if len(att) > len(shown) else "")
         ) if att else '<div class="empty">Nothing blocked, no P1s open, nothing in progress for more than a week.</div>'
-        table = self.area_table(page, m.repos[0]) if m.single else self.repo_table(page)
-        feed = "".join(
-            f'<div class="ev"><span class="when">{ago(m.now, when)}</span><a href="{self.rel(page, self.p_ticket(r, t))}">'
-            f'<span class="verb {verb}">{verb}</span> <span class="id">{e(t["id"])}</span><br><span class="ttl">{e(t["title"])}</span>'
-            f'<br><span class="rp">{e(t["area"] if m.single else r["name"])}</span></a></div>'
-            for when, verb, r, t in m.events()[:14]) or '<div class="empty">No activity yet.</div>'
+        table = (self.area_table(page, m.repos[0]) if m.single else
+                 self.domain_table(page) if m.has_domains else self.repo_table(page))
+        table += self.words_panel(page)
+        if m.title_first:   # KIT-061: what happened, to what, where; the id last
+            feed = "".join(
+                f'<div class="ev"><span class="when">{ago(m.now, when)}</span><a href="{self.rel(page, self.p_ticket(r, t))}">'
+                f'<span class="verb {verb}">{verb}</span> <span class="ttl strong">{e(t["title"])}</span><br>'
+                f'<span class="rp">{e(" · ".join(x for x in (self.where(r, plain=True), t["area"]) if x))}</span> '
+                f'<span class="fid">{e(t["id"])}</span></a></div>'
+                for when, verb, r, t in m.events()[:14]) or '<div class="empty">No activity yet.</div>'
+        else:
+            feed = "".join(
+                f'<div class="ev"><span class="when">{ago(m.now, when)}</span><a href="{self.rel(page, self.p_ticket(r, t))}">'
+                f'<span class="verb {verb}">{verb}</span> <span class="id">{e(t["id"])}</span><br><span class="ttl">{e(t["title"])}</span>'
+                f'<br><span class="rp">{e(t["area"] if m.single else r["name"])}</span></a></div>'
+                for when, verb, r, t in m.events()[:14]) or '<div class="empty">No activity yet.</div>'
         tickets = [t for _, t in m.all]
         body = (f'<h1>Right now</h1><div class="sub">{len(m.repos)} repositor{"y" if m.single else "ies"} · {len(tickets)} tickets · '
                 f'as of {at(m.now)}, from each repository\'s <span class="mono">origin</span></div>{self.counts(tickets)}'
@@ -521,8 +625,12 @@ class Site:
                 f'<aside class="panel"><div class="panel-h"><h2>Latest activity</h2></div><div class="panel-b"><div class="feed">{feed}</div></div></aside></div>')
         return page, self.frame(page, "Home", "home", body)
 
-    def repo_table(self, page):
+    def repo_table(self, page, subset=None, heading="Repositories with work"):
         m = self.m
+        active = [r for r in m.active if subset is None or r in subset]
+        quiet_r = [r for r in m.quiet if subset is None or r in subset]
+        unset_r = [r for r in m.unset if subset is None or r in subset]
+        total = len(m.repos) if subset is None else len(subset)
         z = lambda n: str(n) if n else '<span class="z">0</span>'
         rows = "".join(
             f'<tr><td><a href="{self.rel(page, self.p_repo(r))}"><span class="rname">{e(r["name"])}</span>'
@@ -530,16 +638,16 @@ class Site:
             f'<td class="n">{z(len(r["by"]["in-progress"]))}</td><td class="n">{z(len(r["by"]["queued"]))}</td>'
             f'<td class="n">{(f"<b class=bad>{len(r["by"]["blocked"])}</b>") if r["by"]["blocked"] else z(0)}</td>'
             f'<td class="n hide-sm">{len(r["by"]["closed"])}</td><td class="hide-sm">{sparkline([n for _, n in weekly(r["tickets"], m.now)])}</td>'
-            f'<td class="hide-sm when2">{ago(m.now, r["last"])}</td></tr>' for r in m.active)
+            f'<td class="hide-sm when2">{ago(m.now, r["last"])}</td></tr>' for r in active)
         quiet = ""
-        if m.quiet or m.unset:
+        if quiet_r or unset_r:
             chips = "".join(f'<a class="chip" href="{self.rel(page, self.p_repo(r))}">{e(r["name"])}'
-                            f'{f"<span class=num>{len(r["decisions"])} dec</span>" if r["decisions"] else ""}</a>' for r in m.quiet)
-            unset = "".join(f'<a class="chip dash" href="{self.rel(page, self.p_repo(r))}">{e(r["name"])}</a>' for r in m.unset)
-            quiet = (f'<details class="quiet"><summary>{len(m.quiet)} more repositories use the kit but have no tickets yet'
-                     f'{f" · {len(m.unset)} not set up" if m.unset else ""}</summary><div class="chips">{chips}</div>'
+                            f'{f"<span class=num>{len(r["decisions"])} dec</span>" if r["decisions"] else ""}</a>' for r in quiet_r)
+            unset = "".join(f'<a class="chip dash" href="{self.rel(page, self.p_repo(r))}">{e(r["name"])}</a>' for r in unset_r)
+            quiet = (f'<details class="quiet"><summary>{len(quiet_r)} more repositories use the kit but have no tickets yet'
+                     f'{f" · {len(unset_r)} not set up" if unset_r else ""}</summary><div class="chips">{chips}</div>'
                      f'{f"<div class=chips>{unset}</div>" if unset else ""}</details>')
-        return (f'<section class="panel"><div class="panel-h"><h2>Repositories with work</h2><span class="prog">{len(m.active)} of {len(m.repos)}</span></div>'
+        return (f'<section class="panel"><div class="panel-h"><h2>{e(heading)}</h2><span class="prog">{len(active)} of {total}</span></div>'
                 f'<div class="tbl-wrap"><table><thead><tr><th>Repository</th><th class="n">In&nbsp;progress</th><th class="n">Queued</th>'
                 f'<th class="n">Blocked</th><th class="n hide-sm">Closed</th><th class="hide-sm">Closed / week, 12 wks</th><th class="hide-sm">Last activity</th>'
                 f'</tr></thead><tbody>{rows or "<tr><td colspan=7 class=empty>No tickets in this project yet.</td></tr>"}</tbody></table></div>{quiet}</section>')
@@ -559,6 +667,95 @@ class Site:
                 f'<div class="tbl-wrap"><table><thead><tr><th>Area</th><th class="n">In&nbsp;progress</th><th class="n">Queued</th><th class="n">Blocked</th>'
                 f'<th class="n hide-sm">Closed</th><th class="hide-sm">Closed / week, 12 wks</th><th class="hide-sm">Last activity</th></tr></thead>'
                 f'<tbody>{rows}</tbody></table></div></section>')
+
+    # ── KIT-061: domains, tags, new words ──
+    def domain_stats(self, repos):
+        ts = [t for r in repos for t in r["tickets"]]
+        n = defaultdict(int)
+        for t in ts:
+            n[t["state"]] += 1
+        lasts = [r["last"] for r in repos if r["last"]]
+        return ts, n, (max(lasts) if lasts else None)
+
+    def domain_table(self, page):
+        m = self.m
+        z = lambda n: str(n) if n else '<span class="z">0</span>'
+        busy, idle = [], []
+        for d, repos in m.domains.items():
+            ts, n, last = self.domain_stats(repos)
+            (busy if ts else idle).append((d, repos, ts, n, last))
+        busy.sort(key=lambda x: x[4] or datetime.min, reverse=True)
+        rows = "".join(
+            f'<tr><td><a href="{self.rel(page, self.p_domain(d))}"><span class="dname">{e(d)}</span></a>'
+            f'<span class="dsub">{" · ".join(e(r["name"]) for r in repos if r["tickets"])}</span></td>'
+            f'<td class="n">{z(n["in-progress"])}</td><td class="n">{z(n["queued"])}</td>'
+            f'<td class="n">{(f"<b class=bad>{n["blocked"]}</b>") if n["blocked"] else z(0)}</td><td class="n hide-sm">{n["closed"]}</td>'
+            f'<td class="hide-sm">{sparkline([c for _, c in weekly(ts, m.now)])}</td><td class="hide-sm when2">{ago(m.now, last)}</td></tr>'
+            for d, repos, ts, n, last in busy)
+        idle_html = (f'<div class="panel-foot">No tickets yet: ' + " · ".join(
+            f'<a href="{self.rel(page, self.p_domain(d))}">{e(d)}</a>' for d, *_ in sorted(idle, key=lambda x: x[0].lower())) + "</div>") if idle else ""
+        return (f'<section class="panel"><div class="panel-h"><h2>By domain</h2><span class="prog">{len(busy)} of {len(m.domains)} with work</span></div>'
+                f'<div class="tbl-wrap"><table><thead><tr><th>Domain</th><th class="n">In&nbsp;progress</th><th class="n">Queued</th>'
+                f'<th class="n">Blocked</th><th class="n hide-sm">Closed</th><th class="hide-sm">Closed / week, 12 wks</th><th class="hide-sm">Last activity</th>'
+                f'</tr></thead><tbody>{rows or "<tr><td colspan=7 class=empty>No tickets in this project yet.</td></tr>"}</tbody></table></div>{idle_html}</section>')
+
+    def words_panel(self, page):
+        m = self.m
+        if not m.vocab:
+            return ""
+        ids = {t["id"]: (r, t) for r, t in m.all}
+        def first(row):
+            ft = row.get("first_ticket", "")
+            return (f' · for <a href="{self.rel(page, self.p_ticket(*ids[ft]))}">{e(ft)}</a>' if ft in ids else
+                    (f" · for {e(ft)}" if ft and ft != "-" else ""))
+        items = "".join(
+            f'<div class="wl"><span class="{"areachip" if kind == "areas" else "tagchip"}">{e(w)}</span>'
+            f'<span>{kind[:-1]} · “{e(row.get("meaning", ""))}” · added {ago(m.now, d)}{first(row)}</span></div>'
+            for d, kind, w, row in m.new_words)
+        return (f'<section class="panel words"><div class="panel-h"><h2>Words added this week</h2><span class="prog">{len(m.new_words) or ""}</span></div>'
+                f'<div class="panel-b">{items or "<div class=empty>No new area or tag words this week.</div>"}</div></section>')
+
+    def pairs_lane(self, page, key, pairs):
+        cap = 8
+        head = f'<div class="lane-h">{self.pill(key)}<span class="num">{len(pairs)}</span></div>'
+        if not pairs:
+            return f'<section class="lane">{head}<div class="empty">Nothing {LABEL[key].lower()}.</div></section>'
+        first = "".join(self.row(page, r, t, self.repo_note(r)) for r, t in pairs[:cap])
+        rest = "".join(self.row(page, r, t, self.repo_note(r)) for r, t in pairs[cap:])
+        more = f'<details class="more-items"><summary>Show all {len(pairs)}</summary><div class="rows">{rest}</div></details>' if rest else ""
+        return f'<section class="lane">{head}<div class="rows">{first}</div>{more}</section>'
+
+    def domain_page(self, d):
+        m, page = self.m, self.p_domain(d)
+        repos = m.domains[d]
+        ts, n, last = self.domain_stats(repos)
+        prio = {"P1": 0, "P2": 1, "P3": 2, "P4": 3}
+        pick = lambda s: [(r, t) for r in repos for t in r["by"][s]]
+        prog = sorted(pick("in-progress"), key=lambda p: p[1]["_s"] or datetime.min)
+        que = sorted(pick("queued"), key=lambda p: (prio.get(p[1]["priority"], 2), p[1]["_c"] or datetime.min))
+        sub = (f'{len(repos)} repositor{"y" if len(repos) == 1 else "ies"} · {len(ts)} tickets'
+               f'{f" · last activity {ago(m.now, last)}" if last else ""}')
+        body = (f'{self.crumbs(page, [(d, None)])}<h1>{e(d)}</h1><div class="sub">{sub}</div>'
+                f'<div class="lanes">{self.pairs_lane(page, "in-progress", prog)}{self.pairs_lane(page, "queued", que)}'
+                f'{self.pairs_lane(page, "blocked", pick("blocked"))}</div>'
+                f'<div class="stack" style="margin-top:22px">{self.repo_table(page, repos, "Repositories")}</div>')
+        return page, self.frame(page, d, "", body)
+
+    def tag_page(self, tag):
+        m, page = self.m, self.p_tag(tag)
+        pairs = [(r, t) for r, t in m.all if tag in t.get("tags", [])]
+        live = [p for p in pairs if p[1]["state"] != "closed"]
+        done = sorted([p for p in pairs if p[1]["state"] == "closed"], key=lambda p: p[1]["_x"] or datetime.min, reverse=True)
+        meaning = ((m.vocab.get("tags") or {}).get(tag) or {}).get("meaning", "")
+        rows = lambda ps: '<div class="rows">' + "".join(self.row(page, r, t, self.pill(t["state"]) + self.repo_note(r)) for r, t in ps) + "</div>"
+        body = (f'{self.crumbs(page, [("tag: " + tag, None)])}<h1><span class="tagchip big">{e(tag)}</span></h1>'
+                f'<div class="sub">{f"“{e(meaning)}” · " if meaning else ""}{len(pairs)} tickets across '
+                f'{len({r["name"] for r, _ in pairs})} repositories</div><div class="stack" style="margin-top:22px">'
+                f'<section class="panel"><div class="panel-h"><h2>Open</h2><span class="prog">{len(live)}</span></div><div class="panel-b">'
+                f'{rows(live) if live else "<div class=empty>Nothing open.</div>"}</div></section>'
+                f'<section class="panel"><div class="panel-h"><h2>Closed</h2><span class="prog">{len(done)}</span></div><div class="panel-b">'
+                f'{rows(done) if done else "<div class=empty>Nothing closed yet.</div>"}</div></section></div>')
+        return page, self.frame(page, "tag: " + tag, "", body)
 
     def stale(self, r):
         return ' <span class="stale" title="git fetch failed — showing what origin last held">stale</span>' if r["fetched"] is False else ""
@@ -583,7 +780,8 @@ class Site:
         blk, clo = pick(r["by"]["blocked"]), pick(r["by"]["closed"])
         recent = sorted(clo, key=lambda t: t["_x"] or datetime.min, reverse=True)[:10]
         decs = list(reversed(r["decisions"]))[:6]
-        crumbs = self.crumbs(page, [(r["name"], self.p_repo(r)), (area, None)] if area else [(r["name"], None)])
+        dcrumb = [(m.dom(r), self.p_domain(m.dom(r)))] if m.has_domains else []
+        crumbs = self.crumbs(page, dcrumb + ([(r["name"], self.p_repo(r)), (area, None)] if area else [(r["name"], None)]))
         title = f'{e(area)} <span class="h1-sub">in {e(r["name"])}</span>' if area else e(r["name"])
         sub = (f'{f"Ticket prefix <span class=mono>{e(r["prefix"])}</span> · " if r["prefix"] else ""}{len(pick(r["tickets"]))} tickets'
                f'{"" if area else f" · {len(r["decisions"])} decisions"}{f" · last activity {ago(m.now, r["last"])}" if r["last"] else ""}'
@@ -629,7 +827,7 @@ class Site:
             + "</div>" for i, (lab, d) in enumerate(steps))
         kids = [(kr, kt) for kr, kt in m.all if kt["epic"] == t["id"]] if t["type"] == "EPIC" else []
         kids_html = (f'<section class="panel"><div class="panel-b pad"><h2>Stories in this epic</h2><div class="rows">' + "".join(
-            self.row(page, kr, kt, self.pill(kt["state"]) + ("" if m.single else f"<span>{e(kr['name'])}</span><span>·</span>")) for kr, kt in kids)
+            self.row(page, kr, kt, self.pill(kt["state"]) + self.repo_note(kr)) for kr, kt in kids)
             + "</div></div></section>") if kids else ""
         seen_slugs = set()
         section_links = ['<a class="sec" href="#ticket-content">All</a>']
@@ -643,7 +841,9 @@ class Site:
             section_links.append(f'<a class="sec" href="#{e(sid)}">{e(section["title"])}</a>')
             rendered_sections.append(f'<section class="ticket-section" id="{e(sid)}"><h2>{e(section["title"])}</h2>{markdown_body(section["body"])}</section>')
         commits = r["commits"].get(t["id"], [])
-        crumbs = self.crumbs(page, [(r["name"], self.p_repo(r))] + ([(t["area"], self.p_area(r, t["area"]))] if m.single and t["area"] else []) + [(t["id"], None)])
+        crumbs = self.crumbs(page, ([(m.dom(r), self.p_domain(m.dom(r)))] if m.has_domains else []) + [(r["name"], self.p_repo(r))]
+                             + ([(t["area"], self.p_area(r, t["area"]))] if m.single and t["area"] else []) + [(t["id"], None)])
+        tag_links = " ".join(f'<a class="tagchip" href="{self.rel(page, self.p_tag(x))}">{e(x)}</a>' for x in t.get("tags", []))
         branch_note = ' <span class="stale ok">branch at origin</span>' if t["branch"] and t["state"] == "in-progress" else ""
         body = (f'{crumbs}<div class="thead"><span class="id">{e(t["id"])}</span>{self.typ(t)}{self.pill(t["state"])}{self.pri(t)}{branch_note}</div>'
                 f'<h1>{e(t["title"])}</h1><div class="cols"><div class="stack">'
@@ -652,9 +852,12 @@ class Site:
                 f'<section class="panel"><div class="panel-b pad"><h2>In the ticket</h2><div class="secs">{"".join(section_links)}</div>'
                 f'<div class="path">{e(r["name"])}/{e(t["path"])}</div></div></section>'
                 f'<section class="panel" id="ticket-content"><div class="panel-b pad">{"".join(rendered_sections)}</div></section></div><div class="stack">'
-                f'<section class="panel"><div class="panel-b pad"><dl class="facts"><dt>Repository</dt><dd><a href="{self.rel(page, self.p_repo(r))}">{e(r["name"])}</a></dd>'
+                f'<section class="panel"><div class="panel-b pad"><dl class="facts">'
+                + (f'<dt>Domain</dt><dd><a href="{self.rel(page, self.p_domain(m.dom(r)))}">{e(m.dom(r))}</a></dd>' if m.has_domains else "")
+                + f'<dt>Repository</dt><dd><a href="{self.rel(page, self.p_repo(r))}">{e(r["name"])}</a></dd>'
                 f'<dt>Area</dt><dd>{f"<a href={self.rel(page, self.p_area(r, t["area"]))}>{e(t["area"])}</a>" if t["area"] else "—"}</dd>'
-                f'<dt>Epic</dt><dd>{f"<a href={self.rel(page, self.p_ticket(*epic))}>{e(t["epic"])}</a>" if epic else (e(t["epic"]) or "—")}</dd>'
+                + (f'<dt>Tags</dt><dd>{tag_links}</dd>' if tag_links else "")
+                + f'<dt>Epic</dt><dd>{f"<a href={self.rel(page, self.p_ticket(*epic))}>{e(t["epic"])}</a>" if epic else (e(t["epic"]) or "—")}</dd>'
                 f'<dt>Estimate</dt><dd class="num">{e(t["estimate"]) or "—"}</dd><dt>Priority</dt><dd>{self.pri(t)}</dd></dl></div></section>'
                 f'<section class="panel"><div class="panel-h"><h2>Decisions carried</h2></div><div class="panel-b">' + (
                     '<div class="rows">' + "".join(f'<div class="row two"><span class="id">{e(d)}</span><span class="t dtitle">{e(dt[d])}</span></div>' for d in cited) + "</div>"
@@ -796,6 +999,9 @@ class Site:
                 for a, *_ in self.areas(r):
                     pages.append(self.repo_page(r, a))
         pages += [self.epics_page(), self.decisions_page(), self.metrics_page()]
+        if m.has_domains:                                   # KIT-061
+            pages += [self.domain_page(d) for d in m.domains]
+        pages += [self.tag_page(g) for g in sorted({x for _, t in m.all for x in t.get("tags", [])})]
         if m.single:
             for a, ts, *_ in self.areas(m.repos[0]):
                 pages.append(self.metrics_page(a, ts, self.p_metrics(a)))
@@ -809,8 +1015,11 @@ class Site:
         (self.out / "board.css").write_text(CSS, encoding="utf-8")
         (self.out / "board.js").write_text(JS, encoding="utf-8")
         summary = {"project": m.conf["name"], "built": m.built,
-                   "repos": [{"name": r["name"], "fetched": r["fetched"], "adopted": r["adopted"],
-                              "tickets": {t["id"]: t["state"] for t in r["tickets"]}, "decisions": len(r["decisions"])} for r in m.repos]}
+                   "repos": [{"name": r["name"], "domain": r.get("domain", ""), "fetched": r["fetched"], "adopted": r["adopted"],
+                              "tickets": {t["id"]: t["state"] for t in r["tickets"]},
+                              "ticket_pages": [{"id": t["id"], "title": t["title"], "state": t["state"],
+                                                "url": self.p_ticket(r, t)} for t in r["tickets"]],
+                              "decisions": len(r["decisions"])} for r in m.repos]}
         (self.out / "board.json").write_text(json.dumps(summary, indent=1), encoding="utf-8")
         return [rel for rel, _ in pages]
 
@@ -847,6 +1056,7 @@ a{color:inherit;text-decoration:none}a:focus-visible,select:focus-visible,input:
 .nav{display:flex;gap:4px;flex:1;overflow-x:auto}.nav a{padding:7px 11px;border-radius:6px;color:var(--muted);font-weight:500;font-size:14px;white-space:nowrap}
 .nav a:hover{color:var(--ink);background:var(--surface-2)}.nav a[aria-current="page"]{color:var(--ink);background:var(--surface-3)}
 .jump{font:13px var(--sans);color:var(--ink);background:var(--surface-2);border:1px solid var(--rule);border-radius:6px;padding:6px 8px;max-width:220px}
+.lookup{display:flex;align-items:center;gap:8px;margin:18px 0 22px}.lookup label{font-size:13px;color:var(--muted)}.lookup input{width:180px;font:13px var(--mono);text-transform:uppercase;color:var(--ink);background:var(--surface);border:1px solid var(--rule);border-radius:7px;padding:7px 9px}.lookup button{font:600 13px var(--sans);color:var(--surface);background:var(--accent);border:0;border-radius:7px;padding:8px 11px;cursor:pointer}.lookup button:hover{filter:brightness(.92)}#ticket-results{font-size:14px;color:var(--muted);margin:-10px 0 20px}#ticket-results a{color:var(--accent);font-weight:600}
 .proj{position:relative;flex:none;display:flex;align-items:baseline;gap:8px}
 .proj summary{list-style:none;cursor:pointer;display:flex;align-items:baseline;gap:8px;padding:6px 11px;border:1px solid var(--rule);border-radius:8px;background:var(--surface);white-space:nowrap}
 .proj summary::-webkit-details-marker{display:none}.proj summary:hover{border-color:var(--accent)}
@@ -904,6 +1114,15 @@ td.n,th.n{text-align:right;font-family:var(--mono);font-variant-numeric:tabular-
 .lanes{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;margin-top:22px}
 .lane{background:var(--surface);border:1px solid var(--rule);border-radius:10px;padding:12px 14px 6px;min-width:0}.lane-h{display:flex;align-items:center;gap:8px;margin-bottom:4px}.lane-h .num{color:var(--faint);font-size:13px}
 .lane .row{grid-template-columns:minmax(0,1fr) auto}.lane .row .t{grid-column:1 / -1;font-size:14px}.lane .row .meta{grid-column:2;grid-row:1}.lane .row .sub2{grid-column:1 / -1}
+.row.tf{grid-template-columns:minmax(0,1fr) auto}.row.tf .t{font-weight:500;color:var(--ink)}.row.tf .sub2{grid-column:1 / -1}.lane .row.tf .t{grid-column:1;grid-row:1}
+.row .fid,.ev .fid{margin-left:auto;font-family:var(--mono);font-size:11.5px;color:var(--faint);white-space:nowrap}
+.where{display:inline-flex;gap:5px;align-items:baseline;color:var(--muted)}.where b{font-weight:600;color:var(--ink-soft)}.where .sep{color:var(--faint)}
+.areachip{border:1px solid var(--rule);border-radius:4px;padding:0 6px;color:var(--ink-soft);background:var(--surface-2);font-size:12px;white-space:nowrap}
+.tagchip{border-radius:4px;padding:0 6px;color:var(--accent);background:var(--accent-soft);font-size:12px;white-space:nowrap}a.tagchip:hover{text-decoration:underline}
+.tagchip.big{font-size:22px;padding:2px 10px}.ev .ttl.strong{color:var(--ink)}
+.dname{font-weight:600;display:block}.dsub{display:block;color:var(--faint);font-size:12.5px;margin-top:1px}
+.panel-foot{padding:10px 16px 14px;color:var(--faint);font-size:13px;border-top:1px solid var(--rule-soft)}.panel-foot a{color:var(--muted)}.panel-foot a:hover{color:var(--accent)}
+.words .wl{display:flex;gap:10px;align-items:baseline;flex-wrap:wrap;padding:5px 0;font-size:13px;color:var(--muted)}.words .wl a{color:var(--accent)}
 .more-items summary{justify-content:center;margin:6px 0 8px;padding:7px;border:1px dashed var(--rule);border-radius:7px;color:var(--muted);font-weight:500;font-size:13px}
 .more-items summary:hover{color:var(--accent);border-color:var(--accent)}.more-items[open] summary{display:none}
 dl.facts{display:grid;grid-template-columns:auto minmax(0,1fr);gap:8px 14px;margin:0;font-size:14px}dl.facts dt{color:var(--faint);font-size:12.5px;padding-top:1px}
@@ -968,6 +1187,22 @@ JS = r"""
     }).catch(function(){});
   }, 60000);
 })();
+// Exact ticket lookup uses this project's own static board metadata (KIT-048).
+(function(){
+  var form=document.getElementById('ticket-lookup'), input=document.getElementById('ticket-id'), out=document.getElementById('ticket-results');
+  if(!form||!input||!out||!window.fetch) return;
+  var boardUrl=new URL('board.json', document.currentScript.src).href;
+  fetch(boardUrl,{cache:'no-store'}).then(function(r){return r.ok?r.json():null;}).then(function(b){
+    var pages=[]; (b&&b.repos||[]).forEach(function(repo){ pages=pages.concat(repo.ticket_pages||[]); });
+    form.addEventListener('submit',function(ev){
+      ev.preventDefault(); var id=input.value.trim().toUpperCase();
+      if(!id){out.textContent='Paste a ticket ID.';return;}
+      var hits=pages.filter(function(t){return String(t.id).toUpperCase()===id;});
+      out.innerHTML=hits.length?hits.map(function(t){return '<div><a href="'+new URL(t.url,boardUrl).href+'">'+esc(t.id)+'</a> — '+esc(t.title)+'</div>';}).join(''):'No exact ticket ID found on this board.';
+    });
+  }).catch(function(){out.textContent='Ticket lookup is temporarily unavailable.';});
+  function esc(s){return String(s==null?'':s).replace(/[&<>\"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;'}[c];});}
+})();
 (function(){
   var j=document.getElementById('jump'); if(j) j.addEventListener('change',function(){ if(j.value) location.href=j.value; });
   var s=document.getElementById('met-scope'); if(s) s.addEventListener('change',function(){ location.href=s.value; });
@@ -1004,7 +1239,7 @@ def main(argv: list[str]) -> int:
         now = datetime.now(ZoneInfo("America/New_York")).replace(tzinfo=None)
     except Exception:
         now = datetime.now()
-    repos = [read_repo(r["name"], r["path"], fetch) for r in conf["repos"]]
+    repos = [dict(read_repo(r["name"], r["path"], fetch), domain=r.get("domain", "")) for r in conf["repos"]]
     missing = [r["name"] for r in repos if not r["ok"]]
     model = Model(conf, [r for r in repos if r["ok"]], now)
     out = Path(conf["out"])

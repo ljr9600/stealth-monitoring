@@ -52,6 +52,7 @@ def load_config(root: Path) -> dict:
         "work_item_types": "EPIC STORY TASK BUG SPIKE",
         "epic_field": "epic",
         "prefixes": "",
+        "retired_prefixes": "",   # KIT-059: still resolve, refused for new tickets
         # Never a ticket prefix: id-shaped words that appear in prose with dash-digits (KIT-020).
         "prefix_denylist": "API ID IP SHA AES RSA RFC ISO ADR TLS SSL HTTP HTTPS UTC URL URI DNS TCP UDP SQL CVE PR MR ETA FYI",
         # Epics model (ticketing-template D4): blank = epics live in this repo's own
@@ -99,7 +100,25 @@ def parse_config_text(text: str) -> dict:
 # default branch only when the branch merges, and a merged branch is usually deleted.
 # wi.py and the board both use this, so they can never disagree (KIT-032 AC-5).
 
-ITEM_BRANCH_RE = re.compile(r"(?:^|/)(?:story|bug|task|spike)/([A-Z]{2,10}-\d{3})$")
+# A ticket-id prefix (KIT-057): capital letters, whole words joined by single underscores,
+# 2 to 24 characters: `KIT`, `HOST`, `TWITTER_SCRAPER`. Parsers match PREFIX_RE; declaring a
+# prefix also checks the 24-character cap (valid_prefix). The underscore is a word character,
+# so `\b` before a prefix still means "not inside a longer word" -- an old parser simply does
+# not see `TWITTER_SCRAPER-001`, and no existing id changes meaning. The same grammar in
+# ERE form lives in git-hooks/commit-msg (PFX) and install.sh.
+PREFIX_RE = r"[A-Z](?:_?[A-Z]){1,23}"
+PREFIX_MAX = 24
+ID_RE = PREFIX_RE + r"-\d{3}"
+PREFIX_RULE = ("2 to 24 characters: capital letters, whole words joined by single underscores "
+               "(KIT, MARKETDATA_API)")
+
+
+def valid_prefix(p: str) -> bool:
+    """True when `p` may be declared as a prefix: the grammar AND the length cap."""
+    return len(p) <= PREFIX_MAX and re.fullmatch(PREFIX_RE, p) is not None
+
+
+ITEM_BRANCH_RE = re.compile(r"(?:^|/)(?:story|bug|task|spike)/(" + ID_RE + r")$")
 
 
 def work_branches(repo: Path, remote_only: bool = False) -> set[str]:
@@ -201,6 +220,103 @@ def epics_at_master(eroot: Path, cfg: dict) -> dict[str, dict]:
             out[fm["id"]] = {"type": fm.get("type", "").upper(),
                              "status": fm.get("status", "").upper(), "path": p}
     return out
+
+
+# --- word lists: areas and tags (KIT-060) ------------------------------------------------
+# A project MAY keep `vocabulary/areas.tsv` and `vocabulary/tags.tsv`. In a scoped work repo
+# they are the SCOPE's, read from the epics repo at origin/<default> exactly like epics -- a
+# word exists for other sessions only once it is pushed. Elsewhere (an epics repo itself, a
+# single-repo product) they are read from the repo's own tree. A missing file means that
+# list is not enforced: areas and tags stay free text, which is the behaviour before KIT-060.
+VOCAB_KINDS = ("areas", "tags")
+WORD_RE = r"[a-z0-9]+(?:-[a-z0-9]+)*"
+WORD_MAX = 20
+NOT_WORDS = {"misc", "other", "general", "various"}   # a pile, never a word or a synonym
+
+
+def vocab_rows(text: str) -> list[dict]:
+    """Every row of a list, in order (duplicates kept -- the checker reports them). The header
+    row names the columns; `word` and `meaning` are required, the rest optional:
+    synonyms (comma-separated), added, first_ticket, reason, merged_into."""
+    rows, cols = [], None
+    for line in text.splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        cells = [c.strip() for c in line.split("\t")]
+        if cols is None:
+            cols = [c.lower() for c in cells]
+            continue
+        d = dict(zip(cols, cells + [""] * (len(cols) - len(cells))))
+        d["synonyms"] = [s for s in re.split(r"[,\s]+", d.get("synonyms", "")) if s]
+        d["_cols"] = cols
+        rows.append(d)
+    return rows
+
+
+def vocab_map(text: str) -> dict[str, dict]:
+    """word -> row (the first of any duplicate)."""
+    out: dict[str, dict] = {}
+    for r in vocab_rows(text):
+        if r.get("word"):
+            out.setdefault(r["word"], r)
+    return out
+
+
+def vocab_source(root: Path, cfg: dict, kind: str, staged: bool = False) -> tuple[str | None, str]:
+    """(the list's text, or None when there is NO such list; where it was read).
+
+    "No list" (None, the file is absent) switches the check off, as before KIT-060. "Cannot
+    read the lists" is different and never silently passes: `where` starts with UNAVAILABLE
+    when a scoped repo has no epics clone, or the clone has no origin/<default> to read.
+    `staged` reads this repo's own list from the INDEX, so a commit is judged by what it
+    commits, never by an unstaged edit (the pre-commit checker uses it)."""
+    import subprocess
+    vdir = (cfg.get("vocabulary_dir") or "vocabulary").strip().strip("/") or "vocabulary"
+    rel = f"{vdir}/{kind}.tsv"
+    eroot, why = epics_root(root, cfg)
+    if eroot is None and why != "local":
+        return None, f"UNAVAILABLE: {why}"
+    if eroot is not None:
+        ref = f"origin/{cfg.get('default_branch', 'master')}"
+        if subprocess.run(["git", "-C", str(eroot), "rev-parse", "--verify", "--quiet", ref],
+                          capture_output=True).returncode != 0:
+            return None, (f"UNAVAILABLE: {eroot} has no {ref} to read the word lists from — "
+                          f"run: bash scripts/epics.sh fetch")
+        r = subprocess.run(["git", "-C", str(eroot), "show", f"{ref}:{rel}"], capture_output=True, text=True)
+        return (r.stdout if r.returncode == 0 else None), f"{eroot.name} {ref}:{rel}"
+    if staged:
+        r = subprocess.run(["git", "-C", str(root), "show", f":{rel}"], capture_output=True, text=True)
+        return (r.stdout if r.returncode == 0 else None), f"{rel} (staged)"
+    f = root / rel
+    return (f.read_text(encoding="utf-8") if f.is_file() else None), rel
+
+
+def load_vocab(root: Path, cfg: dict, staged: bool = False) -> tuple[dict[str, tuple[dict, str]], str]:
+    """({kind: (word -> row, where)} for each list that exists, the UNAVAILABLE reason or '')."""
+    out, unavailable = {}, ""
+    for kind in VOCAB_KINDS:
+        text, where = vocab_source(root, cfg, kind, staged)
+        if where.startswith("UNAVAILABLE"):
+            unavailable = where
+        elif text is not None:
+            out[kind] = (vocab_map(text), where)
+    return out, unavailable
+
+
+def check_word(rows: dict[str, dict], kind: str, w: str) -> str:
+    """'' when `w` may be used as a(n) area/tag; otherwise why not, and what to use."""
+    one = kind[:-1]
+    if w in rows and not rows[w].get("merged_into"):
+        return ""
+    if w in rows:
+        return f"{one} '{w}' was merged into '{rows[w]['merged_into']}' — use {rows[w]['merged_into']}"
+    for word, r in rows.items():
+        if w in r["synonyms"]:
+            return f"'{w}' is listed as a synonym of the {one} '{word}' — use {r.get('merged_into') or word}"
+    live = sorted(x for x, r in rows.items() if not r.get("merged_into"))
+    return (f"'{w or '(none)'}' is not on the {kind} list. Use one of: {', '.join(live) or '(the list is empty)'}. "
+            f"If none fits, add a row to the list (docs/TICKETING.md, 'Areas and tags'), push it, "
+            f"then file the ticket.")
 
 
 def _cli() -> int:
@@ -351,7 +467,7 @@ def linkify_refs(html: str, root: Path, cfg: dict, rel) -> str:
     TEXT are linked, never those already inside a tag or an existing <a>.
     """
     pre = re.escape(cfg["citation_prefix"])
-    ref = re.compile(r"\b(" + pre + r"\d+)\b|\b([A-Z]{2,10}-\d{3})\b")
+    ref = re.compile(r"\b(" + pre + r"\d+)\b|\b(" + ID_RE + r")\b")
 
     def sub(m):
         if m.group(1):  # a decision id

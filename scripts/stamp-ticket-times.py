@@ -55,11 +55,10 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from doc_kit import current_actor, load_config  # noqa: E402  (the portable config seam)
+from doc_kit import ID_RE, current_actor, load_config  # noqa: E402  (the portable config seam)
 
 ET = ZoneInfo("America/New_York")
 FMT = "%Y-%m-%d %H:%M ET"
-ID_RE = r"[A-Z]+-\d{3}"
 LIFECYCLE_FIELDS = ("opened", "created", "creator", "opener", "started", "starter",
                     "closed", "closer")
 UPDATE_LOG_HEADER = "## Update Log"

@@ -30,6 +30,10 @@ TYPES="$(cfg work_item_types)";       TYPES="${TYPES:-EPIC STORY TASK BUG SPIKE}
 EXEMPT="$(cfg commit_exempt_regex)"
 KEXEMPT="$(cfg kit_exempt_regex)"; KEXEMPT="${KEXEMPT:-^chore\\(ticketing-template\\): (install|upgrade) v[0-9]+\\.[0-9]+\\.[0-9]+}"
 EPICS_SCOPE="$(cfg epics_scope)"
+# A ticket-id prefix (KIT-057): capital letters, whole words joined by single underscores,
+# 2 to 24 characters -- the ERE twin of doc_kit.PREFIX_RE. `\b` still bounds it: the
+# underscore is a word character, so no id is ever found inside a longer word.
+PFX='[A-Z](_?[A-Z]){1,23}'
 branch_types="$(tr ' ' '\n' <<<"$TYPES" | grep -vx EPIC | tr 'A-Z' 'a-z' | paste -sd'|' - || true)"
 
 agent_trailer_ok() {
@@ -78,6 +82,16 @@ grep -qE '^Merge (branch|remote-tracking|pull request)' <<<"$msg" && exit 0   # 
 grep -qE '^Revert "' <<<"$msg" && exit 0                                      # names the reverted commit
 subject="$(head -1 <<<"$msg")"
 if { [ -n "$EXEMPT" ] && grep -qE "$EXEMPT" <<<"$subject"; } || grep -qE "$KEXEMPT" <<<"$subject"; then exit 0; fi   # machine commits: the repo's list, and the installer's
+# A word-list change (KIT-060): `words: <what changed>` touching ONLY the list files. In a scope
+# the lists live in the epics repo, where every other commit must name an epic -- and the
+# ticket that needs the word is filed AFTER the word is pushed, so there is nothing to name.
+# check-vocabulary.py (pre-commit) still guards the lists' content; this only waives the id.
+VDIR="$(cfg vocabulary_dir)"; VDIR="${VDIR:-vocabulary}"; VDIR="${VDIR%/}"
+if grep -qE '^words: .+' <<<"$subject"; then
+  _staged="$(git diff --cached --name-only)"
+  if [ -n "$_staged" ] && ! grep -qvE "^${VDIR}/[^/]+\.tsv$" <<<"$_staged"; then exit 0; fi
+  echo "commit-msg: a 'words:' commit may touch only ${VDIR}/*.tsv — commit the rest under its work item" >&2; exit 1
+fi
 
 # A RE-AUTHOR: nothing staged AND the subject is HEAD's subject — an amend --no-edit /
 # --reset-author of a commit the hook already accepted. Nothing changes, so nothing else
@@ -86,7 +100,7 @@ if { [ -n "$EXEMPT" ] && grep -qE "$EXEMPT" <<<"$subject"; } || grep -qE "$KEXEM
 # the normal path below — the shortcut must never skip the closed/duplicate/citation
 # rules (KIT-010).
 if git diff --cached --quiet 2>/dev/null && [ "$(git log -1 --format=%s 2>/dev/null)" = "$subject" ]; then
-  for _id in $(grep -oE '\b[A-Z]{2,10}-[0-9]{3}\b' <<<"$subject" | sort -u); do
+  for _id in $(grep -oE "\\b${PFX}-[0-9]{3}\\b" <<<"$subject" | sort -u); do
     # Test the OUTPUT, not ls's exit code: `ls live missing` exits non-zero even when
     # it listed `live` (KIT-009 — the same trap the body-citation check documents).
     [ -n "$(ls "$repo/$TDIR/$_id"-*.md "$repo/$TDIR/closed/$_id"-*.md 2>/dev/null | head -1)" ] && exit 0
@@ -114,11 +128,11 @@ if [ -n "$staged_all" ]; then
   # an .html beside each staged .md (DECISIONS_INDEX.html…) must not turn a ticket-only
   # commit into "work". Judged by the .md path, so nothing else widens.
   if ! sed 's/\.html$/.md/' <<<"$staged_all" | grep -qvE "^(${TDIR}/|(${maint_re})(/|$))"; then
-    present="$(git diff --cached --name-only --diff-filter=AMR | grep -E "^${TDIR}/(closed/)?[A-Z]{2,10}-[0-9]{3}-.*\.md$" || true)"
+    present="$(git diff --cached --name-only --diff-filter=AMR | grep -E "^${TDIR}/(closed/)?${PFX}-[0-9]{3}-.*\.md$" || true)"
     added="$(git diff --cached --name-only --diff-filter=A || true)"
     qualifies=0
     for f in $present; do
-      _id="$(grep -oE '[A-Z]{2,10}-[0-9]{3}' <<<"$(basename "$f")" | head -1)"
+      _id="$(grep -oE "${PFX}-[0-9]{3}" <<<"$(basename "$f")" | head -1)"
       grep -qF "$_id" <<<"$subject" && qualifies=1
     done
     if [ "$qualifies" = 1 ]; then
@@ -145,7 +159,7 @@ fi
 # --- branch discipline: the default branch receives only finished work -------
 branch="$(git symbolic-ref --quiet --short HEAD 2>/dev/null || echo detached)"
 if [ "$branch" = "$DEFAULT_BRANCH" ] || [ "$branch" = "main" ]; then
-  subj_id="$(grep -oE '\b[A-Z]{2,10}-[0-9]{3}\b' <<<"$subject" | head -1 || true)"
+  subj_id="$(grep -oE "\\b${PFX}-[0-9]{3}\\b" <<<"$subject" | head -1 || true)"
   hint="${subj_id:-<AREA>-NNN}"
   # name the files that made this "work" rather than ticket maintenance (KIT-033)
   offending=""
@@ -220,12 +234,13 @@ if [ -n "$EPICS_SCOPE" ]; then
   fi
 fi
 valid_prefixes="$( {
-    ls "$repo/$TDIR"/*.md "$repo/$TDIR"/closed/*.md 2>/dev/null | grep -oE '/[A-Z]{2,10}-[0-9]{3}-' | grep -oE '[A-Z]{2,10}';
+    ls "$repo/$TDIR"/*.md "$repo/$TDIR"/closed/*.md 2>/dev/null | grep -oE "/${PFX}-[0-9]{3}-" | grep -oE "${PFX}";
     cfg prefixes | tr ' ' '\n';
-    cut -f1 <<<"$epics_ls" | grep -oE '^[A-Z]{2,10}';
-  } | grep -E '^[A-Z]{2,10}$' | sort -u || true )"
+    cfg retired_prefixes | tr ' ' '\n';   # KIT-059: retired ids still resolve
+    cut -f1 <<<"$epics_ls" | grep -oE "^${PFX}";
+  } | grep -E "^${PFX}\$" | sort -u || true )"
 is_item_id() { [ -z "$valid_prefixes" ] || grep -qxF "${1%%-*}" <<<"$valid_prefixes"; }
-extract_ids() { grep -oE '\b[A-Z]{2,10}-[0-9]{3}\b' | sort -u \
+extract_ids() { grep -oE "\\b${PFX}-[0-9]{3}\\b" | sort -u \
   | while IFS= read -r _id; do is_item_id "$_id" && printf '%s\n' "$_id"; done; }
 
 # resolve <id> -> "<status>\t<type>\t<where>" ; where = <path> | epics ; empty = unknown
@@ -333,8 +348,8 @@ done
 # must name one (D356).
 added_todo="$(git diff --cached -U0 -- TODO.md 2>/dev/null | grep -E '^\+- \[ \]' || true)"
 if [ -n "$added_todo" ]; then
-  creates_item="$(git diff --cached --name-only --diff-filter=A | grep -cE "^${TDIR}/[A-Z]+-[0-9]{3}-.*\.md$" || true)"
-  untracked="$(grep -vE '\b[A-Z]{2,10}-[0-9]{3}\b' <<<"$added_todo" || true)"
+  creates_item="$(git diff --cached --name-only --diff-filter=A | grep -cE "^${TDIR}/${PFX}-[0-9]{3}-.*\.md$" || true)"
+  untracked="$(grep -vE "\\b${PFX}-[0-9]{3}\\b" <<<"$added_todo" || true)"
   if [ -n "$untracked" ] && [ "${creates_item:-0}" = "0" ]; then
     cat >&2 <<MSG
 

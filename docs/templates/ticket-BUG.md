@@ -5,6 +5,7 @@ type:       BUG
 status:     OPEN
 priority:   P2
 area:       {{AREA}}
+tags:
 opened:     {{DATE}}
 creator:    {{ACTOR}}
 opener:     {{ACTOR}}
@@ -56,6 +57,12 @@ None. — OR — the documents whose current-state claims this bug proved wrong.
 To cite a decision that DROVE this item, write `{{Dn}}` anywhere above; it expands here at commit.
 
 ## Background
+
+## Reopen history
+
+<!-- machine-appended by `python3 scripts/wi.py reopen <ID> "<reason>"` (KIT-054): one entry
+     per reopen — when, who reopened it, the close it reverses and that close's actor, and
+     why it did not hold. Append-only; `reopened:` in the front matter counts these. -->
 
 ## Update Log
 

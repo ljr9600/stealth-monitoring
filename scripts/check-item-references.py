@@ -36,12 +36,12 @@ import sys
 
 import sys as _sys
 _sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-from doc_kit import epics_at_master, epics_root, load_config  # noqa: E402
+from doc_kit import PREFIX_RE, epics_at_master, epics_root, load_config  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 CFG = load_config(ROOT)
 TICKETS = ROOT / CFG.get("tickets_dir", "docs/tickets")
-ID = re.compile(r"\b([A-Z]{2,10})-(\d{3})\b")
+ID = re.compile(r"\b(" + PREFIX_RE + r")-(\d{3})\b")
 
 
 def _epics() -> dict:
@@ -79,8 +79,9 @@ def prefixes() -> set[str]:
     """The union of: every prefix a ticket here uses, every prefix
     docs/doc-kit.config DECLARES, and the scope's epic prefixes (D5)."""
     found = {m.group(1) for f in TICKETS.rglob("*.md")
-             if (m := re.match(r"([A-Z]+)-\d{3}-", f.name))}
+             if (m := re.match("(" + PREFIX_RE + r")-\d{3}-", f.name))}
     found |= set(CFG.get("prefixes", "").split())
+    found |= set(CFG.get("retired_prefixes", "").split())   # old ids still resolve (KIT-059)
     found |= {i.split("-")[0] for i in EPICS}
     return found
 
@@ -88,7 +89,7 @@ def prefixes() -> set[str]:
 def known() -> set[str]:
     ids = set()
     for md in TICKETS.rglob("*.md"):
-        m = re.match(r"([A-Z]+-\d{3})-", md.name)
+        m = re.match("(" + PREFIX_RE + r"-\d{3})-", md.name)
         if m:
             ids.add(m.group(1))
     return ids | set(EPICS)

@@ -48,6 +48,14 @@ if grep -qE "^${TDIR}/.*\.md$" <<<"$staged"; then
   [ "$fail" = 0 ] || { echo "pre-commit: work items REJECTED — fix the problems above." >&2; exit 1; }
   echo "pre-commit: tickets well-formed (shape, citations, doc impact, status)"
 fi
+# Areas and tags come from the word lists when the project keeps them (KIT-060): a staged
+# ticket whose area/tags are new or changed, and a staged list file, are checked.
+VDIR="$(cfg vocabulary_dir)"; VDIR="${VDIR:-vocabulary}"; VDIR="${VDIR%/}"
+if [ -f "$repo/scripts/check-vocabulary.py" ] && grep -qE "^(${TDIR}/.*\.md|${VDIR}/[^/]*\.tsv)$" <<<"$staged"; then
+  python3 "$repo/scripts/check-vocabulary.py" >/tmp/ticketing-template-vocab.log 2>&1 \
+    || { sed 's/^/    /' /tmp/ticketing-template-vocab.log >&2; echo "pre-commit: REJECTED — areas/tags must come from the word lists (python3 scripts/wi.py words)." >&2; exit 1; }
+  grep -E "^word lists:" /tmp/ticketing-template-vocab.log || true
+fi
 # An epics repo checks its registry against the repos on every commit (KIT-018): a row's
 # prefix equals what the repo declares, no prefix twice, every claimant has a row.
 if [ -f "$repo/.epics-root" ] && [ -f "$repo/scripts/check-scope.py" ]; then

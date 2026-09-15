@@ -25,11 +25,10 @@ import subprocess
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from doc_kit import find_decision, load_config  # noqa: E402
+from doc_kit import ID_RE, find_decision, load_config  # noqa: E402
 
 FILLED = "<!-- machine-filled: decisions recorded while this item was worked, copied verbatim from the decision files (KIT-017) -->"
 MARKER = re.compile(r"\{\{(D\d+)\}\}")
-ID_RE = r"[A-Z]{2,10}-\d{3}"
 
 
 def git(root: Path, *args: str) -> str:
