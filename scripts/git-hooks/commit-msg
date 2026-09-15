@@ -32,6 +32,47 @@ KEXEMPT="$(cfg kit_exempt_regex)"; KEXEMPT="${KEXEMPT:-^chore\\(ticketing-templa
 EPICS_SCOPE="$(cfg epics_scope)"
 branch_types="$(tr ' ' '\n' <<<"$TYPES" | grep -vx EPIC | tr 'A-Z' 'a-z' | paste -sd'|' - || true)"
 
+agent_trailer_ok() {
+  local n value expected raw
+  n="$(grep -icE '^Agent:[[:space:]]*(Codex|Claude|Human)[[:space:]]*$' <<<"$msg" || true)"
+  [ "$n" = 1 ] || return 1
+  value="$(grep -iE '^Agent:' <<<"$msg" | sed -E 's/^Agent:[[:space:]]*//I' | tr -d '\r')"
+  grep -qxF "$value" <<< $'Codex\nClaude\nHuman' || return 1
+  raw="${TICKETING_ACTOR:-$(git config --get ticketing.actor 2>/dev/null || true)}"
+  if [ -n "$raw" ]; then
+    case "${raw^^}" in
+      CODEX) expected=Codex ;; CLAUDE) expected=Claude ;; HUMAN) expected=Human ;;
+      *) return 1 ;;
+    esac
+    [ "$value" = "$expected" ] || return 1
+  fi
+}
+
+actor_aware_staged() {
+  local f creator
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    case "$f" in
+      "$TDIR"/*.md|"$TDIR"/closed/*.md)
+        creator="$(git show ":$f" 2>/dev/null | sed -nE 's/^creator:[[:space:]]*//p' | head -1 | tr -d '\r')"
+        case "$creator" in Codex|Claude) return 0 ;; esac
+        ;;
+    esac
+  done <<<"${staged_all:-}"
+  return 1
+}
+
+require_agent_trailer() {
+  if ! agent_trailer_ok; then
+    echo "  COMMIT REJECTED — this actor-aware ticket requires exactly one trailer:" >&2
+    echo "      Agent: Codex" >&2
+    echo "      Agent: Claude" >&2
+    echo "      Agent: Human" >&2
+    echo "  Set TICKETING_ACTOR for ticket creation/lifecycle stamping, then include the matching trailer." >&2
+    exit 1
+  fi
+}
+
 # --- exemptions, each with a reason -----------------------------------------
 grep -qE '^Merge (branch|remote-tracking|pull request)' <<<"$msg" && exit 0   # named by the merged commits
 grep -qE '^Revert "' <<<"$msg" && exit 0                                      # names the reverted commit
@@ -69,7 +110,10 @@ MAINT="$MAINT docs/DECISIONS_INDEX.md CLAUDE.md docs/decisions"
 staged_all="$(git diff --cached --name-only || true)"
 if [ -n "$staged_all" ]; then
   maint_re="$(tr ' ' '\n' <<<"$MAINT" | sed 's/[.[\*^$|]/\\&/g' | paste -sd'|' -)"
-  if ! grep -qvE "^(${TDIR}/|(${maint_re})(/|$))" <<<"$staged_all"; then
+  # A rendered X.html rides wherever its X.md may (KIT-033): a repo's own hook that renders
+  # an .html beside each staged .md (DECISIONS_INDEX.html…) must not turn a ticket-only
+  # commit into "work". Judged by the .md path, so nothing else widens.
+  if ! sed 's/\.html$/.md/' <<<"$staged_all" | grep -qvE "^(${TDIR}/|(${maint_re})(/|$))"; then
     present="$(git diff --cached --name-only --diff-filter=AMR | grep -E "^${TDIR}/(closed/)?[A-Z]{2,10}-[0-9]{3}-.*\.md$" || true)"
     added="$(git diff --cached --name-only --diff-filter=A || true)"
     qualifies=0
@@ -85,6 +129,7 @@ if [ -n "$staged_all" ]; then
       done
     fi
     if [ "$qualifies" = 1 ]; then
+      actor_aware_staged && require_agent_trailer
       for chk in check-doc-impact.py check-ticket-shape.py check-item-references.py; do
         if [ -f "$repo/scripts/$chk" ] && ! python3 "$repo/scripts/$chk" >&2; then
           echo >&2; echo "  COMMIT REJECTED — a ticket fails $chk (see above). A ticket-only commit" >&2
@@ -102,10 +147,19 @@ branch="$(git symbolic-ref --quiet --short HEAD 2>/dev/null || echo detached)"
 if [ "$branch" = "$DEFAULT_BRANCH" ] || [ "$branch" = "main" ]; then
   subj_id="$(grep -oE '\b[A-Z]{2,10}-[0-9]{3}\b' <<<"$subject" | head -1 || true)"
   hint="${subj_id:-<AREA>-NNN}"
+  # name the files that made this "work" rather than ticket maintenance (KIT-033)
+  offending=""
+  if [ -n "${maint_re:-}" ]; then
+    offending="$(while read -r f; do [ -n "$f" ] || continue; m="$f"; [ "${f%.html}" != "$f" ] && m="${f%.html}.md"
+      grep -qE "^(${TDIR}/|(${maint_re})(/|$))" <<<"$m" || echo "      $f"; done <<<"$staged_all" | head -8 || true)"
+  fi
   cat >&2 <<MSG
 
   COMMIT REJECTED — work commits do not land on $DEFAULT_BRANCH.
-
+${offending:+
+  Staged, and not a ticket, decision or maintenance file (nor its rendered .html):
+$offending
+}
   Work happens on a branch named for its item and arrives as a merge:
 
       git switch -c story/$hint        # or bug/, task/, spike/
@@ -194,6 +248,17 @@ resolve() {
 # to. Ids in the body are REFERENCES to other work; they must exist, any status.
 subject_ids="$(extract_ids <<<"$subject" || true)"
 all_ids="$(extract_ids <<<"$msg" || true)"
+
+# New actor-aware tickets carry creator: Codex/Claude. Their subsequent commits must
+# identify the same class of actor in a machine-readable trailer. Older tickets and
+# ordinary human tickets remain valid without a retroactive rewrite.
+for id in $subject_ids; do
+  r="$(resolve "$id")"; where="$(cut -f3- <<<"$r")"
+  if [ -f "$where" ] && grep -qE '^creator:[[:space:]]*(Codex|Claude)[[:space:]]*$' "$where"; then
+    require_agent_trailer
+    break
+  fi
+done
 
 if [ -z "$subject_ids" ]; then
   if [ -n "$all_ids" ]; then

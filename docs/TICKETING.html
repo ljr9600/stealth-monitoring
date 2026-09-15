@@ -79,9 +79,28 @@ after that the hooks teach.</p>
 epics repo; <code>epics_scope = &lt;name&gt;</code> means a work repo whose epics live in <code>&lt;name&gt;-epics</code>).</p>
 <h2 id="1-start-of-a-session">1. Start of a session</h2>
 <pre><code class="language-bash">git fetch -q                       # the hooks compare against origin/master
-python3 scripts/wi.py              # the board: in flight, blocked, queued, by priority
+python3 scripts/wi.py              # this repo's board: in flight, blocked, queued, by priority
 bash scripts/epics.sh fetch        # work repo with a scope: refresh the epics clone
 </code></pre>
+<h3 id="working-from-a-git-worktree">Working from a Git worktree</h3>
+<p>Every worktree is a separate checkout of the same repository. Do not use the same
+branch in two worktrees. From the new worktree, install the versioned hooks before
+creating or committing tickets:</p>
+<pre><code class="language-bash">git worktree add ../repo-KIT-043 -b story/KIT-043
+cd ../repo-KIT-043
+bash scripts/install-git-hooks.sh
+export TICKETING_ACTOR=Codex       # or Claude; Human is the explicit human actor
+</code></pre>
+<p>Worktrees contain tracked files only. Copy required ignored configuration or secrets
+from the main checkout using the repository's documented safe procedure; never commit
+those files. Ticket files, lifecycle stamps, and generated documentation must be
+written from the active worktree and checked with <code>git -C</code> or <code>git rev-parse</code> when a
+script is invoked from elsewhere. The hook resolves the active worktree's top level,
+so it does not write ticket state to the main checkout.</p>
+<p>Across repositories, your project's board (built by <code>scripts/gen-board.py</code>, one per
+project; ask whoever runs it for the URL) and the OpenProject mirror show the same
+tickets as they stand at origin. Both are read-only, and nothing you have not pushed
+appears on either.</p>
 <p>Pick the highest-priority unblocked item. If nothing covers what you must do, <strong>open a
 ticket first</strong> — nothing is too small for a TASK.</p>
 <h2 id="2-create-a-ticket-one-at-a-time-on-master-then-push">2. Create a ticket — one at a time, on master, then push</h2>
@@ -97,6 +116,20 @@ git push                                  # BEFORE branching: the hooks check or
 <ul>
 <li><strong>One creation per commit.</strong> <code>wi.py new</code> refuses while another new ticket is
   uncommitted. Create → commit → push → next.</li>
+<li><strong>Actor identity is explicit.</strong> Set <code>TICKETING_ACTOR=Codex</code>, <code>Claude</code>, or <code>Human</code>.
+  New tickets record <code>creator:</code> and <code>opener:</code>; the first work and close hooks record
+  <code>starter:</code> and <code>closer:</code>. Commits touching Codex/Claude-created tickets carry one
+  <code>Agent: Codex</code> or <code>Agent: Claude</code> trailer.</li>
+<li><strong>Every touch is narrated, not just the three moments (KIT-050).</strong> A ticket's
+  <code>## Update Log</code> section gets one line per commit that changes it — timestamp, the
+  same actor identity as above, and what changed (a field diff, which body section
+  moved, or <code>created</code>/<code>started</code>/<code>closed</code> for those three). Append-only: an existing
+  line is never rewritten, and re-running the hook before an actual commit does not
+  duplicate the pending line.</li>
+<li><strong>What a creation commit may carry on master:</strong> the ticket file, a decision recorded
+  with it (<code>wi.py decision new</code>, and the index the hook regenerates), the paths in
+  <code>maintenance_paths</code>, and the rendered <code>.html</code> sibling of any of those (a repo whose
+  own hook renders documents, KIT-033). Anything else is work, and belongs on a branch.</li>
 <li><strong>The id is <code>PREFIX-NNN</code></strong>, and the prefix must be declared in <code>docs/doc-kit.config</code>
   (<code>prefixes =</code>) or already in use. Anything else id-shaped (<code>SHA-256</code>, <code>ADR-007</code>) is
   prose, not a ticket — and words like <code>API</code>, <code>SHA</code>, <code>RFC</code>, <code>TLS</code> can never be prefixes
@@ -152,6 +185,21 @@ git push                                  # BEFORE branching: the hooks check or
   other agent until merge (the board reads master), so the hook refuses a
   <code>&lt;type&gt;/&lt;ID&gt;</code> branch commit until <code>&lt;ID&gt;</code> is on <code>origin/master</code>.</li>
 </ul>
+<h3 id="if-another-agent-takes-the-id-first">If another agent takes the ID first</h3>
+<p>Ticket numbers are allocated by convention, so two agents can choose the same next
+number between fetches. Git is the authority; do not force the push and do not use
+<code>--no-verify</code> to get past the collision.</p>
+<pre><code class="language-bash">git fetch -q origin
+# inspect origin/&lt;default branch&gt; and choose the next unused ID
+python3 scripts/wi.py new &lt;next-free-ID&gt; &lt;TYPE&gt; &quot;&lt;title&gt;&quot;
+</code></pre>
+<p>If a local unpushed ticket already has the claimed ID, keep the work but change its
+<code>id:</code> and filename to the next unused ID, then run the ticket checks again. If the
+collision appears during <code>git push</code>, fetch first, verify whether the remote accepted
+the ticket or another agent used the ID, and reconcile against the remote tree before
+retrying. A remote ticket always wins; never publish two tickets with one ID. If a
+branch or commit already names the old ID, update the branch name and commit subject
+before continuing. This is discovery-and-retry, not a locking system.</p>
 <h2 id="3-work-on-a-branch-named-for-the-item">3. Work — on a branch named for the item</h2>
 <pre><code class="language-bash">git switch -c story/MDAPI-012            # story/ bug/ task/ spike/ — exactly one item per branch
 ... edit, test ...
@@ -204,7 +252,8 @@ git push                                    # an epic exists for others ONLY at 
 <ul>
 <li><strong>Epics are created, updated and closed on master</strong> by ticket-only commits (the
   subject names the epic; the commit touches only ticket files and the paths listed
-  in <code>maintenance_paths</code>, e.g. <code>repos.tsv</code>, <code>docs/DECISIONS.md</code>). Nobody branches an
+  in <code>maintenance_paths</code>, e.g. <code>repos.tsv</code>, <code>docs/DECISIONS.md</code>, plus their rendered
+  <code>.html</code> siblings). Nobody branches an
   epic; nobody commits code against one.</li>
 <li><strong>Children are derived</strong> from each story's <code>epic:</code> field — never listed by hand.</li>
 <li><strong><code>repos.tsv</code></strong> in the epics repo lists every member repository with its ticket prefix;
@@ -250,6 +299,10 @@ each one it found as <code>kept:</code> (KIT-031).</p>
 <tr>
 <td>has no ticket on origin/master yet</td>
 <td>create the ticket on master, commit, <strong>push</strong>, come back</td>
+</tr>
+<tr>
+<td>ticket ID already exists or push is non-fast-forward</td>
+<td>fetch again, inspect the remote, choose the next free ID, reconcile any unpushed local ticket, then retry</td>
 </tr>
 <tr>
 <td>is CLOSED</td>

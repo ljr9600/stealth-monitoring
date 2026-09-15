@@ -12,16 +12,18 @@ Three things, each of which has actually been wrong in this repository:
    has numbered acceptance criteria (AC-n) and a test-case section mapping them
    (TC-<ID>-nnn or a named gate-wired test). The grandfather clause that
    covered pre-standard items was deleted when DOCS-019 retrofitted them all.
-4. SUMMARY: every open item begins with a plain-English '## Summary' as its
+4. ACTORS: newly actor-aware items carry creator/opener, and closed actor-aware
+   items carry starter/closer. Historical items without creator are grandfathered.
+5. SUMMARY: every open item begins with a plain-English '## Summary' as its
    FIRST section — readable by a product manager, above the technical
    contract (DOCS-023 template rule; DOCS-024 retrofitted the backlog).
-5. THE STORY (--require-story): every open STORY/BUG carries a '## The story'
+6. THE STORY (--require-story): every open STORY/BUG carries a '## The story'
    section — the code-verified human narrative (actors, flow, break point,
    who uses the path, repercussions; standard section 6 item 2). Behind a flag
    until DOCS-026 retrofits the backlog (D403: never wire a knowingly-red
    check); DOCS-026's close adds the flag to the gate line.
 
-6. TIME STAMPS (GOV-005): every item carries a machine-stamped `created:`;
+7. TIME STAMPS (GOV-005): every item carries a machine-stamped `created:`;
    a closed item carries `started:` and `closed:` too; all in 'YYYY-MM-DD
    HH:MM ET' and in chronological order. The stamps are written by
    scripts/stamp-ticket-times.py at the moment of the event -- a missing or
@@ -74,6 +76,22 @@ def time_problems(name: str, fm: dict, is_closed: bool) -> list:
     return out
 
 
+def actor_problems(name: str, fm: dict, is_closed: bool) -> list:
+    """Actor-aware tickets retain who performed lifecycle events."""
+    if not fm.get("creator"):
+        return []  # tickets created before actor metadata was introduced
+    out = []
+    fields = ("creator", "opener") + (("starter", "closer") if is_closed else ())
+    for field in fields:
+        value = fm.get(field, "").strip()
+        if not value:
+            out.append(f"{name}: actor-aware item is missing '{field}:'.\n"
+                       "    Set it to Codex, Claude, or Human; lifecycle hooks stamp future events.")
+        elif value.lower() not in {"codex", "claude", "human"}:
+            out.append(f"{name}: '{field}:' must be Codex, Claude, or Human (got '{value}').")
+    return out
+
+
 def front_matter(path: Path) -> dict:
     text = path.read_text(encoding="utf-8", errors="replace")
     m = re.match(r"^---\n(.*?)\n---\n", text, re.S)
@@ -103,6 +121,7 @@ def main() -> int:
         fm = front_matter(f)
         status = fm.get("status", "")
         problems.extend(time_problems(f.name, fm, is_closed=False))
+        problems.extend(actor_problems(f.name, fm, is_closed=False))
         if status not in ENUM:
             problems.append(
                 f"{f.name}: status '{status}' is not one of OPEN|BLOCKED|CLOSED.\n"
@@ -154,6 +173,7 @@ def main() -> int:
             fm = front_matter(f)
             status = fm.get("status", "")
             problems.extend(time_problems(f"closed/{f.name}", fm, is_closed=True))
+            problems.extend(actor_problems(f"closed/{f.name}", fm, is_closed=True))
             if status != "CLOSED":
                 problems.append(
                     f"closed/{f.name}: in closed/ but says 'status: {status}' — the board believes\n"

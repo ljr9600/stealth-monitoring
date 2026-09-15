@@ -23,7 +23,7 @@ import subprocess
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-from doc_kit import load_config  # noqa: E402  (the portable config seam)
+from doc_kit import current_actor, load_config, item_state, work_branches  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 CFG = load_config(ROOT)
@@ -67,13 +67,15 @@ def set_field(path: pathlib.Path, key: str, value: str) -> str:
 
 def listing() -> int:
     rows = []
+    branches = work_branches(ROOT)
     for md in sorted(TICKETS.glob("*.md")):
         t = md.read_text()
-        rows.append((field(t, "priority").lower() or DEFAULT, field(t, "status"),
+        state = item_state(field(t, "status"), field(t, "started"), field(t, "id") in branches)  # D20
+        rows.append((field(t, "priority").lower() or DEFAULT, state,
                      field(t, "id"), field(t, "type"), field(t, "title"),
                      field(t, "estimate") or "—"))
-    for group, label in (("in-progress", "IN PROGRESS"), ("blocked", "BLOCKED"), ("open", "QUEUED")):
-        sel = [r for r in rows if r[1].lower() == group]
+    for group, label in (("in-progress", "IN PROGRESS"), ("blocked", "BLOCKED"), ("queued", "QUEUED")):
+        sel = [r for r in rows if r[1] == group]
         if not sel:
             continue
         print(f"\n{label}")
@@ -147,7 +149,8 @@ def new(args: list[str]) -> int:
         return 2
     text = (tpl.read_text(encoding="utf-8")
             .replace("{{ID}}", wid).replace("{{TITLE}}", title)
-            .replace("{{AREA}}", area).replace("{{DATE}}", datetime.date.today().isoformat()))
+            .replace("{{AREA}}", area).replace("{{DATE}}", datetime.date.today().isoformat())
+            .replace("{{ACTOR}}", current_actor(ROOT)))
     text = re.sub(r"^type:.*$", "type:".ljust(12) + typ, text, count=1, flags=re.M)
     if epic:
         if re.search(r"^epic:", text, re.M):
@@ -271,9 +274,14 @@ def main() -> int:
         print("nothing to change", file=sys.stderr)
         return 2
     print("\n".join(changes))
-    subprocess.run(["python3", str(ROOT / "scripts" / "render-work-items.py")],
-                   capture_output=True)
-    print("  (html re-rendered; not committed — check `git diff` first)")
+    renderer = ROOT / "scripts" / "render-work-items.py"
+    if renderer.exists():
+        result = subprocess.run(["python3", str(renderer)], capture_output=True)
+        if result.returncode == 0:
+            print("  (html re-rendered; not committed — check `git diff` first)")
+        else:
+            print(f"  (render-work-items.py failed: {result.stderr.decode().strip()})",
+                  file=sys.stderr)
     return 0
 
 

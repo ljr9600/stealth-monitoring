@@ -23,9 +23,34 @@ epics repo; `epics_scope = <name>` means a work repo whose epics live in `<name>
 
 ```bash
 git fetch -q                       # the hooks compare against origin/master
-python3 scripts/wi.py              # the board: in flight, blocked, queued, by priority
+python3 scripts/wi.py              # this repo's board: in flight, blocked, queued, by priority
 bash scripts/epics.sh fetch        # work repo with a scope: refresh the epics clone
 ```
+
+### Working from a Git worktree
+
+Every worktree is a separate checkout of the same repository. Do not use the same
+branch in two worktrees. From the new worktree, install the versioned hooks before
+creating or committing tickets:
+
+```bash
+git worktree add ../repo-KIT-043 -b story/KIT-043
+cd ../repo-KIT-043
+bash scripts/install-git-hooks.sh
+export TICKETING_ACTOR=Codex       # or Claude; Human is the explicit human actor
+```
+
+Worktrees contain tracked files only. Copy required ignored configuration or secrets
+from the main checkout using the repository's documented safe procedure; never commit
+those files. Ticket files, lifecycle stamps, and generated documentation must be
+written from the active worktree and checked with `git -C` or `git rev-parse` when a
+script is invoked from elsewhere. The hook resolves the active worktree's top level,
+so it does not write ticket state to the main checkout.
+
+Across repositories, your project's board (built by `scripts/gen-board.py`, one per
+project; ask whoever runs it for the URL) and the OpenProject mirror show the same
+tickets as they stand at origin. Both are read-only, and nothing you have not pushed
+appears on either.
 
 Pick the highest-priority unblocked item. If nothing covers what you must do, **open a
 ticket first** — nothing is too small for a TASK.
@@ -46,6 +71,20 @@ Rules the hooks apply at this moment:
 
 - **One creation per commit.** `wi.py new` refuses while another new ticket is
   uncommitted. Create → commit → push → next.
+- **Actor identity is explicit.** Set `TICKETING_ACTOR=Codex`, `Claude`, or `Human`.
+  New tickets record `creator:` and `opener:`; the first work and close hooks record
+  `starter:` and `closer:`. Commits touching Codex/Claude-created tickets carry one
+  `Agent: Codex` or `Agent: Claude` trailer.
+- **Every touch is narrated, not just the three moments (KIT-050).** A ticket's
+  `## Update Log` section gets one line per commit that changes it — timestamp, the
+  same actor identity as above, and what changed (a field diff, which body section
+  moved, or `created`/`started`/`closed` for those three). Append-only: an existing
+  line is never rewritten, and re-running the hook before an actual commit does not
+  duplicate the pending line.
+- **What a creation commit may carry on master:** the ticket file, a decision recorded
+  with it (`wi.py decision new`, and the index the hook regenerates), the paths in
+  `maintenance_paths`, and the rendered `.html` sibling of any of those (a repo whose
+  own hook renders documents, KIT-033). Anything else is work, and belongs on a branch.
 - **The id is `PREFIX-NNN`**, and the prefix must be declared in `docs/doc-kit.config`
   (`prefixes =`) or already in use. Anything else id-shaped (`SHA-256`, `ADR-007`) is
   prose, not a ticket — and words like `API`, `SHA`, `RFC`, `TLS` can never be prefixes
@@ -77,6 +116,26 @@ Rules the hooks apply at this moment:
 - **Never in a feature branch.** A ticket born inside a branch is invisible to every
   other agent until merge (the board reads master), so the hook refuses a
   `<type>/<ID>` branch commit until `<ID>` is on `origin/master`.
+
+### If another agent takes the ID first
+
+Ticket numbers are allocated by convention, so two agents can choose the same next
+number between fetches. Git is the authority; do not force the push and do not use
+`--no-verify` to get past the collision.
+
+```bash
+git fetch -q origin
+# inspect origin/<default branch> and choose the next unused ID
+python3 scripts/wi.py new <next-free-ID> <TYPE> "<title>"
+```
+
+If a local unpushed ticket already has the claimed ID, keep the work but change its
+`id:` and filename to the next unused ID, then run the ticket checks again. If the
+collision appears during `git push`, fetch first, verify whether the remote accepted
+the ticket or another agent used the ID, and reconcile against the remote tree before
+retrying. A remote ticket always wins; never publish two tickets with one ID. If a
+branch or commit already names the old ID, update the branch name and commit subject
+before continuing. This is discovery-and-retry, not a locking system.
 
 ## 3. Work — on a branch named for the item
 
@@ -141,7 +200,8 @@ git push                                    # an epic exists for others ONLY at 
 
 - **Epics are created, updated and closed on master** by ticket-only commits (the
   subject names the epic; the commit touches only ticket files and the paths listed
-  in `maintenance_paths`, e.g. `repos.tsv`, `docs/DECISIONS.md`). Nobody branches an
+  in `maintenance_paths`, e.g. `repos.tsv`, `docs/DECISIONS.md`, plus their rendered
+  `.html` siblings). Nobody branches an
   epic; nobody commits code against one.
 - **Children are derived** from each story's `epic:` field — never listed by hand.
 - **`repos.tsv`** in the epics repo lists every member repository with its ticket prefix;
@@ -176,6 +236,7 @@ each one it found as `kept:` (KIT-031).
 | work commits do not land on master | `git switch -c <type>/<ID>` and commit there |
 | this branch belongs to X | the subject must name X; other items go in the body |
 | has no ticket on origin/master yet | create the ticket on master, commit, **push**, come back |
+| ticket ID already exists or push is non-fast-forward | fetch again, inspect the remote, choose the next free ID, reconcile any unpushed local ticket, then retry |
 | is CLOSED | reopen it or open a new item — unless this commit is the close (stage the move) |
 | is an EPIC, a tracking parent | commit against one of its stories; cite the epic in the body |
 | cited in the body but does not exist | file it, or fix the id — a name that looks tracked and isn't is the worst case |

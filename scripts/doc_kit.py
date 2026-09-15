@@ -20,7 +20,20 @@ from __future__ import annotations
 import sys; sys.dont_write_bytecode = True  # no __pycache__ litter in adopting repos (KIT-011)
 
 import re
+import os
+import subprocess
 from pathlib import Path
+
+ACTORS = {"CODEX": "Codex", "CLAUDE": "Claude", "HUMAN": "Human"}
+
+
+def current_actor(root: Path) -> str:
+    """Return the process-local ticketing actor."""
+    raw = os.environ.get("TICKETING_ACTOR", "").strip()
+    if not raw:
+        raw = subprocess.run(["git", "-C", str(root), "config", "--get", "ticketing.actor"],
+                             capture_output=True, text=True).stdout.strip()
+    return ACTORS.get(raw.upper(), "Human")
 
 
 def load_config(root: Path) -> dict:
@@ -56,18 +69,56 @@ def load_config(root: Path) -> dict:
     }
     f = root / "docs" / "doc-kit.config"
     if f.exists():
-        for line in f.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            k, v = line.split("=", 1)
-            v = v.strip()
-            # An uninstalled template still carries @PLACEHOLDER@ values; a
-            # placeholder is not a setting (it once read as a scope named "@…@").
-            if re.fullmatch(r"@[A-Z_]+@", v):
-                v = ""
-            cfg[k.strip()] = v
+        cfg.update(parse_config_text(f.read_text(encoding="utf-8")))
     return cfg
+
+
+def parse_config_text(text: str) -> dict:
+    """`key = value` lines (# comments) -> dict. Shared by load_config (a working tree)
+    and the board (a config read from origin/<branch>, KIT-032)."""
+    out: dict = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        v = v.strip()
+        # An uninstalled template still carries @PLACEHOLDER@ values; a
+        # placeholder is not a setting (it once read as a scope named "@…@").
+        if re.fullmatch(r"@[A-Z_]+@", v):
+            v = ""
+        out[k.strip()] = v
+    return out
+
+
+# --- derived state (D6, D20) ------------------------------------------------------------
+#
+# Status is OPEN | BLOCKED | CLOSED. "In progress" is never declared: an OPEN item is in
+# progress when work on it has begun — its `started:` stamp is set (the first commit on its
+# branch writes it) OR a `<type>/<ID>` branch exists. Both are needed: `started:` reaches the
+# default branch only when the branch merges, and a merged branch is usually deleted.
+# wi.py and the board both use this, so they can never disagree (KIT-032 AC-5).
+
+ITEM_BRANCH_RE = re.compile(r"(?:^|/)(?:story|bug|task|spike)/([A-Z]{2,10}-\d{3})$")
+
+
+def work_branches(repo: Path, remote_only: bool = False) -> set[str]:
+    """Ids that have a `<type>/<ID>` branch — at origin (remote_only) or anywhere."""
+    import subprocess
+    refs = ["refs/remotes/origin"] if remote_only else ["refs/heads", "refs/remotes/origin"]
+    r = subprocess.run(["git", "-C", str(repo), "for-each-ref", "--format=%(refname:short)", *refs],
+                       capture_output=True, text=True)
+    return {m.group(1) for line in r.stdout.splitlines() if (m := ITEM_BRANCH_RE.search(line))}
+
+
+def item_state(status: str, started: str, has_branch: bool) -> str:
+    """'closed' | 'blocked' | 'in-progress' | 'queued' — the one definition (D20)."""
+    s = (status or "").upper()
+    if s == "CLOSED":
+        return "closed"
+    if s == "BLOCKED":
+        return "blocked"
+    return "in-progress" if (started or has_branch) else "queued"
 
 
 # --- epics repo resolution (ticketing-template D4/D5) --------------------------------

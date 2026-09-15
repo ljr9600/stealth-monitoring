@@ -10,6 +10,7 @@ Edits made in OpenProject are overwritten on the next run — by design.
 
     mirror-openproject.py --repo PATH --project IDENT [--name NAME] [--ref origin/master]
                           [--include-closed] [--epics-project IDENT] [--dry-run]
+                          [--parent IDENT [--parent-name NAME]] [--private | --public]
 
 Connection: $TT_OPENPROJECT_ENV, else ~/.config/ticketing-template/openproject.env,
 else ./.op.env — KEY=VALUE lines: OP_URL, OP_TOKEN, and optionally the custom-field
@@ -103,16 +104,42 @@ class OP:
             sys.exit(f"mirror: OpenProject has no {kind[:-1]} named {name!r} (have {sorted(ids)})")
         return ids[name]
 
-    def ensure_project(self, ident, name, dry):
+    def ensure_project(self, ident, name, dry, parent=None, public=None):
+        """The project's id, creating it if missing (KIT-007). With `parent` = (ident, name)
+        it also sits under that project, created first if missing, and is moved there if it
+        is anywhere else. `public` True/False reconciles its visibility on every run. None
+        for either leaves an existing project exactly as it is (KIT-037, D22)."""
+        parent_href = None
+        if parent:
+            pid = self.ensure_project(parent[0], parent[1], dry, public=public)
+            parent_href = f"/api/v3/projects/{pid}" if pid is not None else None
         r = self.s.get(f"{self.url}/api/v3/projects/{ident}")
         if r.status_code == 200:
-            return r.json()["id"]
+            p = r.json()
+            fix = {}
+            if public is not None and bool(p.get("public")) != public:
+                fix["public"] = public
+            if parent_href and ((p.get("_links") or {}).get("parent") or {}).get("href") != parent_href:
+                fix["_links"] = {"parent": {"href": parent_href}}
+            if fix:
+                what = ", ".join(f"public={v}" if k == "public" else f"parent={parent[0]}" for k, v in fix.items())
+                if dry:
+                    print(f"  would set project {ident}: {what}")
+                else:
+                    rr = self.patch(f"/api/v3/projects/{p['id']}", fix)
+                    if rr.status_code >= 300:
+                        sys.exit(f"mirror: cannot update project {ident}: {rr.status_code} {rr.text[:300]}")
+                    print(f"  project {ident}: {what}")
+            return p["id"]
         if dry:
             print(f"  would create project {ident}"); return None
-        r = self.post("/api/v3/projects", {"identifier": ident, "name": name or ident, "public": True})
+        body = {"identifier": ident, "name": name or ident, "public": True if public is None else public}
+        if parent_href:
+            body["_links"] = {"parent": {"href": parent_href}}
+        r = self.post("/api/v3/projects", body)
         if r.status_code >= 300:
             sys.exit(f"mirror: cannot create project {ident}: {r.status_code} {r.text[:300]}")
-        print(f"  created project {ident}")
+        print(f"  created project {ident}" + (f" under {parent[0]}" if parent_href else ""))
         return r.json()["id"]
 
     def existing(self, ident):
@@ -186,12 +213,18 @@ def main():
     ap.add_argument("--name", default=""); ap.add_argument("--ref", default="origin/master")
     ap.add_argument("--include-closed", action="store_true"); ap.add_argument("--epics-project", default="")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--parent", default="", help="file the project under this project (KIT-037)")
+    ap.add_argument("--parent-name", default="")
+    vis = ap.add_mutually_exclusive_group()
+    vis.add_argument("--private", dest="public", action="store_false", default=None)
+    vis.add_argument("--public", dest="public", action="store_true")
     a = ap.parse_args()
     op = OP(load_env())
     files = tickets_at(a.repo, a.ref)
     if not files:
         print(f"mirror {a.project}: no tickets at {a.ref} (or ref missing) — nothing to do"); return 0
-    project_id = op.ensure_project(a.project, a.name, a.dry_run)
+    parent = (a.parent, a.parent_name or a.parent) if a.parent else None
+    project_id = op.ensure_project(a.project, a.name, a.dry_run, parent=parent, public=a.public)
     have = op.existing(a.project) if project_id else {}
     versions = {v["name"]: v["id"] for v in op.get(f"/api/v3/projects/{a.project}/versions")["_embedded"]["elements"]} if project_id else {}
     n = {"created": 0, "updated": 0, "unchanged": 0, "skipped_closed": 0, "failed": 0}

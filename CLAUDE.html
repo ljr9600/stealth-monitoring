@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>CLAUDE</title>
+<style>
+:root {
+  --fg: #24292f;
+  --muted: #57606a;
+  --bg: #ffffff;
+  --accent: #0969da;
+  --border: #d0d7de;
+  --code-bg: #f6f8fa;
+}
+* { box-sizing: border-box; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  color: var(--fg);
+  background: var(--bg);
+  max-width: 1100px;
+  margin: 40px auto;
+  padding: 0 24px 80px;
+  line-height: 1.55;
+}
+h1 { font-size: 2em; border-bottom: 2px solid var(--border); padding-bottom: 8px; margin-top: 1.2em; }
+h2 { font-size: 1.5em; border-bottom: 1px solid var(--border); padding-bottom: 6px; margin-top: 1.8em; }
+h3 { font-size: 1.2em; margin-top: 1.6em; }
+h4 { font-size: 1.05em; margin-top: 1.4em; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: var(--code-bg);
+  padding: 0.15em 0.4em;
+  border-radius: 4px;
+  font-size: 0.92em;
+}
+pre {
+  background: var(--code-bg);
+  padding: 16px;
+  border-radius: 6px;
+  overflow-x: auto;
+  line-height: 1.45;
+}
+pre code { background: transparent; padding: 0; font-size: 0.9em; }
+table { border-collapse: collapse; margin: 1em 0; }
+th, td { border: 1px solid var(--border); padding: 8px 12px; text-align: left; }
+th { background: var(--code-bg); font-weight: 600; }
+blockquote {
+  border-left: 4px solid var(--border);
+  margin-left: 0;
+  padding: 0 16px;
+  color: var(--muted);
+}
+hr { border: 0; border-top: 1px solid var(--border); margin: 2em 0; }
+.mermaid { background: var(--code-bg); padding: 12px; border-radius: 6px; margin: 1em 0; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({startOnLoad:true, theme:'default'});</script>
+</head>
+<body>
+<h1 id="claudemd">CLAUDE.md</h1>
+<!-- ticketing-template:begin (written by install.sh — edit the kit, not this block) -->
+<h2 id="work-items-this-repo-runs-ticketing-template">🎫 Work items — this repo runs ticketing-template</h2>
+<p><strong>Read <code>docs/TICKETING.md</code> before your first commit here.</strong> It is the complete procedure:
+create → push → branch → work → close → merge, and epics. The git hooks enforce it and
+print the fixing command when you break a rule.</p>
+<ul>
+<li>This repo's ticket prefix(es): <code>MONIT</code>. Epics scope: <code>stealth</code>.</li>
+<li>Board: <code>python3 scripts/wi.py</code> · new item: <code>python3 scripts/wi.py new &lt;PFX&gt;-NNN &lt;TYPE&gt; "&lt;title&gt;"</code></li>
+<li>One ticket creation per commit, on master, <strong>pushed before you branch</strong>; every commit's
+  subject names its item; work never lands on master directly.</li>
+<li>Set <code>TICKETING_ACTOR=Claude</code> for Claude or <code>TICKETING_ACTOR=Codex</code> for Codex before
+   creating or working on tickets. The shared procedure covers Git worktrees; read it
+   before using one.</li>
+<li><strong>Codex instruction loading is upstream-only:</strong> read this repository's <code>AGENTS.md</code>, then
+  read each parent directory's <code>AGENTS.md</code> while walking upward to the workspace boundary
+  (<code>~/dev</code>) or home directory. Read nearest parent first; never search descendants or
+  sibling repositories. A machine-global <code>~/.codex/AGENTS.md</code>, when present, may point to
+  the workspace-level file and is read before this chain.</li>
+<li>Multi-repo work is an EPIC in <code>stealth-epics</code> (beside this repo or an ancestor), one STORY per repo (<code>epic: &lt;ID&gt;</code>).</li>
+<li>Decisions: <code>python3 scripts/wi.py decision new "&lt;title&gt;"</code> → one file in <code>docs/decisions/</code>, same commit, four parts; it is copied in full into the ticket you are on; cite an earlier one with <code>{{Dn}}</code>. Status: <code>OPEN | BLOCKED | CLOSED</code>.</li>
+<li>After every clone: <code>bash scripts/install-git-hooks.sh</code>, then <code>bash scripts/epics.sh ensure</code></li>
+<li>New here? <code>docs/TICKETING.md</code> is the procedure; the kit is https://github.com/ljr9600/ticketing-template.git — start at its <code>START-HERE.md</code>.</li>
+</ul>
+<!-- ticketing-template:end -->
+</body>
+</html>

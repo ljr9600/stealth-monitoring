@@ -7,6 +7,7 @@ scripts/decisions-index.py
 scripts/decisions-into-tickets.py
 scripts/doc_kit.py
 scripts/epics.sh
+scripts/gen-board.py
 scripts/install-git-hooks.sh
 scripts/mirror-openproject.py
 scripts/mirror-scope.sh

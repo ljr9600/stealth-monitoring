@@ -46,6 +46,7 @@ at wrong times (origin/bug/VIEW-007 taught this). Backfill is evidence, not
 reconstruction.
 """
 import sys; sys.dont_write_bytecode = True  # no __pycache__ litter in adopting repos (KIT-011)
+import hashlib
 import re
 import subprocess
 import sys
@@ -54,11 +55,14 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from doc_kit import load_config  # noqa: E402  (the portable config seam)
+from doc_kit import current_actor, load_config  # noqa: E402  (the portable config seam)
 
 ET = ZoneInfo("America/New_York")
 FMT = "%Y-%m-%d %H:%M ET"
 ID_RE = r"[A-Z]+-\d{3}"
+LIFECYCLE_FIELDS = ("opened", "created", "creator", "opener", "started", "starter",
+                    "closed", "closer")
+UPDATE_LOG_HEADER = "## Update Log"
 
 
 def _cfg(root: Path) -> tuple[str, str]:
@@ -94,11 +98,17 @@ def stamp(path: Path, field: str, value: str) -> bool:
     if not m:
         return False
     fm = m.group(1)
-    if re.search(rf"^{field}:", fm, re.M):
-        return False
     line = f"{field}:".ljust(12) + value + "\n"
-    anchor = None  # insert after the LAST of these already present
-    for prior in ("opened", "created", "started"):
+    existing = re.search(rf"^{field}:[ \t]*([^\n]*)\n", fm, re.M)
+    if existing:
+        if existing.group(1).strip():
+            return False
+        new_fm = fm[:existing.start()] + line + fm[existing.end():]
+        path.write_text("---\n" + new_fm + "---\n" + text[m.end():], encoding="utf-8")
+        return True
+    anchor = None  # insert after the LAST earlier lifecycle field already present
+    order = ("opened", "created", "creator", "opener", "started", "starter", "closed", "closer")
+    for prior in order:
         if prior == field:
             break
         am = None
@@ -108,6 +118,22 @@ def stamp(path: Path, field: str, value: str) -> bool:
             anchor = am.end()
     new_fm = fm + line if anchor is None else fm[:anchor] + line + fm[anchor:]
     path.write_text("---\n" + new_fm + "---\n" + text[m.end():], encoding="utf-8")
+    return True
+
+
+def restage_if_needed(root: Path, path: Path, field: str) -> bool:
+    """Re-stage a lifecycle field left unstaged after a later hook rejects a commit."""
+    rel = str(path.relative_to(root))
+    working = path.read_text(encoding="utf-8") if path.exists() else ""
+    wm = re.search(rf"^{field}:[ \t]*(\S.*?)\s*$", working, re.M)
+    if not wm:
+        return False
+    indexed = git(root, "show", f":{rel}")
+    im = re.search(rf"^{field}:[ \t]*(\S.*?)\s*$", indexed, re.M)
+    if im:
+        return False
+    subprocess.run(["git", "-C", str(root), "add", rel], check=False)
+    print(f"stamp-ticket-times: re-staged {rel} ({field})")
     return True
 
 
@@ -131,17 +157,187 @@ def first_work_commit(root: Path, item: str, created_sha: str | None) -> str | N
     return next((w for w, s in naming if s != created_sha), None)
 
 
+def split_front_matter(text: str) -> tuple[dict, str]:
+    m = re.match(r"^---\n(.*?\n)---\n", text, re.S)
+    if not m:
+        return {}, text
+    fm = {}
+    for line in m.group(1).splitlines():
+        if ":" in line and not line.strip().startswith("#"):
+            k, v = line.split(":", 1)
+            fm[k.strip()] = v.strip()
+    return fm, text[m.end():]
+
+
+def split_sections(body: str) -> dict[str, str]:
+    sections: dict[str, str] = {}
+    current = None
+    buf: list[str] = []
+    for line in body.splitlines():
+        if line.startswith("## "):
+            if current is not None:
+                sections[current] = "\n".join(buf).strip()
+            current = line[3:].strip()
+            buf = []
+        elif current is not None:
+            buf.append(line)
+    if current is not None:
+        sections[current] = "\n".join(buf).strip()
+    return sections
+
+
+def summarize_change(old_text: str | None, new_text: str) -> str:
+    """One phrase for the Update Log: what this commit changed about the ticket.
+
+    A brand-new file is 'created'. Otherwise the moment this commit newly sets
+    started:/closed: is named the same way the front matter already names it
+    (GOV-005's three moments read the same in prose as in the fields) rather
+    than as a raw field diff. Anything else names the non-lifecycle field(s)
+    that changed, or the body section(s) that differ from the last commit.
+    """
+    if old_text is None:
+        return "created"
+    old_fm, old_body = split_front_matter(old_text)
+    new_fm, new_body = split_front_matter(new_text)
+
+    closing = not old_fm.get("closed") and new_fm.get("closed")
+    starting = not old_fm.get("started") and new_fm.get("started")
+    parts = []
+    if closing:
+        parts.append("closed")
+    elif starting:
+        parts.append("started")
+
+    for key in sorted(set(old_fm) | set(new_fm)):
+        if key in LIFECYCLE_FIELDS:
+            continue
+        if key == "status" and closing:
+            continue  # already reported as 'closed', not a raw status flip
+        ov, nv = (old_fm.get(key) or "").strip(), (new_fm.get(key) or "").strip()
+        if ov != nv:
+            parts.append(f"{key}: {ov or '(none)'} -> {nv or '(none)'}")
+
+    old_sections = split_sections(old_body)
+    new_sections = split_sections(new_body)
+    changed = [h for h, t in new_sections.items()
+               if h.strip().lower() != "update log" and old_sections.get(h) != t]
+    changed += [h + " (removed)" for h in old_sections
+                if h.strip().lower() != "update log" and h not in new_sections]
+    if changed:
+        parts.append("body: " + ", ".join(changed))
+
+    return "; ".join(parts) if parts else "edited"
+
+
+def _canonical(text: str) -> str:
+    """(front matter, body sections) with Update Log itself excluded -- the part
+    of a ticket a fingerprint should actually vary on."""
+    fm, body = split_front_matter(text)
+    sections = {h: t for h, t in split_sections(body).items()
+                if h.strip().lower() != "update log"}
+    return repr(sorted(fm.items())) + "\x00" + repr(sorted(sections.items()))
+
+
+def fingerprint(old_text: str | None, new_text: str) -> str:
+    """Identifies the (before, after) pair an Update Log line describes -- NOT the
+    rendered note, which two different edits can render identically (two separate
+    body edits both touching Summary both say 'body: Summary'). A hook re-run
+    before the actual commit sees the same (old_text, new_text) pair as the run
+    before it and must not append a second, duplicate line for it."""
+    h = hashlib.sha1()
+    h.update((old_text or "").encode("utf-8"))
+    h.update(b"\x00")
+    h.update(_canonical(new_text).encode("utf-8"))
+    return h.hexdigest()[:8]
+
+
+def already_logged(text: str, fp: str) -> bool:
+    last = None
+    for line in text.split("\n"):
+        if line.startswith("- "):
+            last = line
+    return last is not None and last.endswith(f"[{fp}]")
+
+
+def append_update_log(text: str, entry: str) -> str:
+    """Insert a new bullet into ## Update Log, creating the section if absent.
+    Never touches an existing line -- append-only, same guarantee as stamp()."""
+    lines = text.split("\n")
+    for i, ln in enumerate(lines):
+        if ln.strip() == UPDATE_LOG_HEADER:
+            j = i + 1
+            while j < len(lines) and not lines[j].startswith("## "):
+                j += 1
+            k = j
+            while k > i + 1 and lines[k - 1].strip() == "":
+                k -= 1
+            return "\n".join(lines[:k] + [f"- {entry}"] + lines[k:])
+    return text.rstrip("\n") + "\n\n" + UPDATE_LOG_HEADER + "\n\n" + f"- {entry}\n"
+
+
+def staged_ticket_touches(root: Path, tdir: str) -> list[tuple[str | None, str]]:
+    """[(old_path_or_None, new_path), ...] for every staged ticket .md, rename-aware
+    (a close's `git mv` must diff against the pre-move blob, not report 'created')."""
+    out = git(root, "diff", "--cached", "--name-status", "-M")
+    pat = re.compile(rf"^{re.escape(tdir)}/(closed/)?{ID_RE}-[^/]+\.md$")
+    changes = []
+    for line in out.splitlines():
+        parts = line.split("\t")
+        status = parts[0]
+        if status.startswith("R"):
+            old_path, new_path = parts[1], parts[2]
+        elif status == "A":
+            old_path, new_path = None, parts[1]
+        elif status == "M":
+            old_path, new_path = parts[1], parts[1]
+        else:  # D, C -- not an update to narrate
+            continue
+        if pat.match(new_path):
+            changes.append((old_path, new_path))
+    return changes
+
+
+def update_log(root: Path, tdir: str, actor: str, now: str) -> list[str]:
+    """Append one Update Log line to every ticket this commit touches (KIT-050)."""
+    touched = []
+    for old_path, new_path in staged_ticket_touches(root, tdir):
+        new_file = root / new_path
+        if not new_file.exists():
+            continue
+        new_text = new_file.read_text(encoding="utf-8")
+        old_text = git(root, "show", f"HEAD:{old_path}") if old_path else None
+        if old_path and not old_text:
+            old_text = None  # HEAD had no such blob -- treat as a creation
+        note = summarize_change(old_text, new_text)
+        fp = fingerprint(old_text, new_text)
+        if already_logged(new_text, fp):
+            continue
+        updated = append_update_log(new_text, f"{now} — {actor} — {note} [{fp}]")
+        if updated != new_text:
+            new_file.write_text(updated, encoding="utf-8")
+            touched.append(new_path)
+    return touched
+
+
 def precommit(root: Path) -> int:
     tdir, btypes = _cfg(root)
     staged = git(root, "diff", "--cached", "--name-only").splitlines()
     added = git(root, "diff", "--cached", "--name-only", "--diff-filter=A").splitlines()
     now = now_et()
+    actor = current_actor(root)
     stamped: list[str] = []
 
     for p in added:  # created: a new live ticket file in this commit
         if re.fullmatch(rf"{re.escape(tdir)}/{ID_RE}-[^/]+\.md", p) and (root / p).exists():
             if stamp(root / p, "created", now):
                 stamped.append(p)
+            if stamp(root / p, "creator", actor):
+                stamped.append(p)
+            if stamp(root / p, "opener", actor):
+                stamped.append(p)
+            restage_if_needed(root, root / p, "created")
+            restage_if_needed(root, root / p, "creator")
+            restage_if_needed(root, root / p, "opener")
 
     # started: first commit on the item's branch
     branch = git(root, "symbolic-ref", "--quiet", "--short", "HEAD").strip()
@@ -150,11 +346,23 @@ def precommit(root: Path) -> int:
         hits = sorted((root / tdir).glob(f"{bm.group(1)}-*.md"))
         if len(hits) == 1 and stamp(hits[0], "started", now):
             stamped.append(str(hits[0].relative_to(root)))
+        if len(hits) == 1 and stamp(hits[0], "starter", actor):
+            stamped.append(str(hits[0].relative_to(root)))
+        if len(hits) == 1:
+            restage_if_needed(root, hits[0], "started")
+            restage_if_needed(root, hits[0], "starter")
 
     for p in staged:  # closed: the ticket is staged under closed/ in this commit
         if re.fullmatch(rf"{re.escape(tdir)}/closed/{ID_RE}-[^/]+\.md", p) and (root / p).exists():
             if stamp(root / p, "closed", now):
                 stamped.append(p)
+            if stamp(root / p, "closer", actor):
+                stamped.append(p)
+            if stamp(root / p, "starter", actor):
+                stamped.append(p)
+            restage_if_needed(root, root / p, "closed")
+            restage_if_needed(root, root / p, "closer")
+            restage_if_needed(root, root / p, "starter")
             # GOV-006: an item FILED ON ANOTHER ITEM'S BRANCH never saw a first
             # commit on a branch of its own, so it reaches its close with no
             # started: -- and the gate then refuses the close after a full run,
@@ -176,6 +384,14 @@ def precommit(root: Path) -> int:
     for p in stamped:
         git(root, "add", p)
         print(f"stamp-ticket-times: stamped {p}")
+
+    # KIT-050: narrate what changed, for this commit and any other ticket edit --
+    # run AFTER staging the lifecycle fields above, so the diff this reads (index
+    # vs HEAD) already reflects them, and a started:/closed: moment narrates as
+    # such rather than as a raw field diff.
+    for p in update_log(root, tdir, actor, now):
+        git(root, "add", p)
+        print(f"stamp-ticket-times: update-log {p} ({actor})")
     return 0
 
 

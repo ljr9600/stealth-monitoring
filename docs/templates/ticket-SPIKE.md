@@ -6,6 +6,10 @@ status:     OPEN
 priority:   P3
 area:       {{AREA}}
 opened:     {{DATE}}
+creator:    {{ACTOR}}
+opener:     {{ACTOR}}
+starter:
+closer:
 estimate:
 epic:
 ---
@@ -37,3 +41,8 @@ To cite a decision that DROVE this item, write `{{Dn}}` anywhere above; it expan
 
 ## Background
 
+## Update Log
+
+<!-- machine-appended by scripts/stamp-ticket-times.py (KIT-050) on every commit that
+     touches this file: timestamp, actor (creator/closer identity or whoever is
+     current), and what changed. Append-only -- an existing line is never rewritten. -->
