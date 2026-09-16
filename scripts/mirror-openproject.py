@@ -28,6 +28,9 @@ import sys
 
 import requests
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from doc_kit import foreign_git_env  # noqa: E402  (reads OTHER repos; KIT-069)
+
 TYPE_NAME = {"EPIC": "Epic", "STORY": "Story", "TASK": "Task", "BUG": "Bug", "SPIKE": "Spike"}
 STATUS_NAME = {"OPEN": "New", "BLOCKED": "Blocked", "CLOSED": "Closed", "IN-PROGRESS": "In progress"}
 
@@ -51,7 +54,7 @@ def load_env():
 
 
 def git(repo, *args):
-    r = subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True)
+    r = subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True, env=foreign_git_env())
     return r.stdout if r.returncode == 0 else ""
 
 

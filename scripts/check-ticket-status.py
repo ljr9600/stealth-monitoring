@@ -71,7 +71,12 @@ def time_problems(name: str, fm: dict, is_closed: bool) -> list:
                 f"{name}: {field} '{v}' is not 'YYYY-MM-DD HH:MM ET' (GOV-005).\n"
                 f"    Fix: delete the line and run {BACKFILL}")
         else:
-            parsed[field] = datetime.strptime(v[:-3].rstrip(), "%Y-%m-%d %H:%M")
+            try:
+                parsed[field] = datetime.strptime(v[:-3].rstrip(), "%Y-%m-%d %H:%M")
+            except ValueError:  # right shape, impossible day or time: refuse, don't crash (KIT-070)
+                out.append(
+                    f"{name}: {field} '{v}' is not a real date and time (GOV-005).\n"
+                    f"    Fix: delete the line and run {BACKFILL}")
     # Ordering: nothing may postdate the close. created<=started is NOT required —
     # three items (CP-002, SEC-001, DOCS-022) were honestly ticketed AFTER work
     # began, and backfill records history as it happened rather than as it should

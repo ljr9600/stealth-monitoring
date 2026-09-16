@@ -36,6 +36,9 @@ to `root`:
     board    = Open Teleporter | http://192.168.1.40:8099/
     # optional: shown in the footer
     refresh  = every 5 minutes
+    # optional (KIT-066): a guide page in the top menu — the file's `## ` sections, then every
+    # repository's prefix and next id, then the area and tag word lists
+    guide    = How tickets are made | docs/HOW-TICKETS-ARE-MADE.md
     # optional: the front door listing every board (KIT-039) — an "All boards" link in the menu
     portal   = http://192.168.1.50:8102/
     # optional: after building, rsync the board here — where kit/board/serve.sh serves it (KIT-035)
@@ -51,9 +54,10 @@ import subprocess
 from collections import defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from doc_kit import parse_config_text, item_state, ITEM_BRANCH_RE, ID_RE as _ID, vocab_map  # noqa: E402
+from doc_kit import parse_config_text, item_state, ITEM_BRANCH_RE, ID_RE as _ID, vocab_map, foreign_git_env  # noqa: E402
 
 ID_RE = re.compile(r"\b(" + _ID + r")\b")
 FM_RE = re.compile(r"^---\n(.*?)\n---\n?(.*)$", re.S)
@@ -109,21 +113,25 @@ def load_board_config(path: Path) -> dict:
     return {"name": cfg.get("name", "Board"), "out": str(rel(cfg["out"]).resolve()) if cfg.get("out") else "",
             "refresh": cfg.get("refresh", ""), "repos": out, "boards": boards,
             "publish": cfg.get("publish", ""), "portal": cfg.get("portal", ""),
-            "row_style": (cfg.get("row_style") or "id-first").strip()}
+            "row_style": (cfg.get("row_style") or "id-first").strip(),
+            "guide": (lambda lab, _, pth: {"label": lab.strip(), "path": rel(pth.strip())} if pth.strip() else None)(
+                *(cfg.get("guide") or "").partition("|"))}
 
 
 def origin_name(p: Path) -> str:
     """The repository's own name, from its origin remote — not the folder it happens to be
     checked out in (a worktree, a renamed clone: KIT-038)."""
     url = subprocess.run(["git", "-C", str(p), "remote", "get-url", "origin"],
-                         capture_output=True, text=True).stdout.strip().rstrip("/")
+                         capture_output=True, text=True, env=foreign_git_env()).stdout.strip().rstrip("/")
     return re.sub(r"\.git$", "", re.split(r"[/:]", url)[-1]) if url else ""
 
 
 # ─── reading one repository at origin/<branch> ──────────────────────────────────────────
 
 def git(repo: Path, *a) -> str:
-    r = subprocess.run(["git", "-C", str(repo), *a], capture_output=True, text=True)
+    # Board members are foreign repositories even when the board runs in a hook (D34).
+    r = subprocess.run(["git", "-C", str(repo), *a], capture_output=True, text=True,
+                       env=foreign_git_env())
     return r.stdout if r.returncode == 0 else ""
 
 
@@ -131,7 +139,74 @@ def stamp(s: str):
     m = STAMP_RE.search(s or "")
     if not m:
         return None
-    return datetime(int(m[1]), int(m[2]), int(m[3]), int(m[4] or 12), int(m[5] or 0))
+    try:
+        return datetime(int(m[1]), int(m[2]), int(m[3]), int(m[4] or 12), int(m[5] or 0))
+    except ValueError:      # the shape of a date for a day that does not exist (KIT-070)
+        return None
+
+
+LOG_ROW = re.compile(r"^- (?P<when>\d{4}-\d{2}-\d{2} \d{2}:\d{2} ET) — (?P<actor>.+?) — (?P<note>.*?)(?: \[[0-9a-f]{8}\])?$")
+
+
+def history_rows(text):
+    inside, rows = False, []
+    for number, line in enumerate(text.splitlines(), 1):
+        if line.startswith("## "):
+            inside = line[3:].strip().lower() == "update log"
+        if inside and (match := LOG_ROW.fullmatch(line)):
+            rows.append({**match.groupdict(), "line": number, "raw": line})
+    return rows
+
+
+def commit_metadata(text):
+    records = {}
+    for record in text.split("\x1e"):
+        fields = record.strip("\n").split("\x1f", 3)
+        if len(fields) != 4:
+            continue
+        sha, when, subject, actor = fields
+        try:
+            when = datetime.fromisoformat(when).astimezone(ZoneInfo("America/New_York")).strftime("%Y-%m-%d %H:%M ET")
+        except ValueError:
+            when = ""
+        records[sha] = {"sha": sha, "hash": sha[:8], "when": when, "subject": subject,
+                        "actor": {"codex": "Codex", "claude": "Claude", "human": "Human"}.get(actor.strip().lower(), "")}
+    return records
+
+
+COMMIT_FORMAT = "%H%x1f%cI%x1f%s%x1f%(trailers:key=Agent,valueonly,separator=%x2c)%x1e"
+
+
+def commit_base(repo):
+    # Known hosting formats only; never put remote credentials into generated pages (D42).
+    remote = git(repo, "remote", "get-url", "origin").strip()
+    match = re.fullmatch(r"(?:https?://(?:[^/@]+@)?|git@)(github\.com|gitlab\.com)[:/]([\w./-]+)", remote)
+    if not match:
+        return ""
+    host, path = match.groups()
+    path = path.removesuffix(".git").rstrip("/")
+    return f"https://{host}/{path}/" + ("-/commit/" if host == "gitlab.com" else "commit/")
+
+
+def attach_history(repo, ref, ticket, metadata, base):
+    """Blame the published file, following renames, to connect each durable row to its commit."""
+    if not ticket["history"]:
+        return
+    by_line = {}
+    number, sha = None, None
+    for line in git(repo, "blame", "--line-porcelain", ref, "--", ticket["path"]).splitlines():
+        if match := re.fullmatch(r"([0-9a-f]{40}) \d+ (\d+)(?: \d+)?", line):
+            sha, number = match[1], int(match[2])
+        elif line.startswith("\t") and number is not None:
+            by_line[number] = sha
+    for row in ticket["history"]:
+        sha = by_line.get(row["line"])
+        if sha and sha not in metadata:
+            metadata.update(commit_metadata(git(repo, "show", "-s", "--format=" + COMMIT_FORMAT, sha)))
+        info = metadata.get(sha, {})
+        row.update(subject=info.get("subject", ""), sha=sha or "", url=base + sha if base and sha else "")
+        # Old Human rows were guesses; the actual commit trailer supplies provenance.
+        row["actor"] = info.get("actor") or row["actor"]
 
 
 def parse_ticket(text: str, path: str) -> dict | None:
@@ -165,7 +240,8 @@ def parse_ticket(text: str, path: str) -> dict | None:
             "created": fm.get("created") or fm.get("opened", ""), "started": fm.get("started", ""),
             "closed": fm.get("closed", ""), "summary": summary,
             "reopened": int(fm["reopened"]) if fm.get("reopened", "").strip().isdigit() else 0,
-            "sections": sections,
+            "sections": sections, "history": history_rows(text),
+            "creator": fm.get("creator", ""), "starter": fm.get("starter", ""), "closer": fm.get("closer", ""),
             "cites": sorted(set(re.findall(r"\bD\d+\b", body)), key=lambda d: int(d[1:])), "path": path}
 
 
@@ -187,9 +263,12 @@ def inline_md(raw: str) -> str:
 
 
 def markdown_body(raw: str) -> str:
-    """Render ticket prose without allowing ticket text to inject HTML."""
+    """Render ticket prose without allowing ticket text to inject HTML: paragraphs, `-` and `1.`
+    lists (an indented next line continues the item), pipe tables, ###/#### headings, fenced
+    code (KIT-067). Every piece of text goes through inline_md(), which escapes first."""
     lines = [line.rstrip() for line in raw.splitlines() if not line.strip().startswith("<!--")]
-    out, para, code, items = [], [], False, []
+    out, para, table, items = [], [], [], []
+    code, kind = False, None                      # kind: the open list, "ul" | "ol"
 
     def flush_para():
         if para:
@@ -197,29 +276,83 @@ def markdown_body(raw: str) -> str:
             para.clear()
 
     def flush_items():
+        nonlocal kind
         if items:
-            out.append('<ul>' + ''.join(f'<li>{inline_md(x)}</li>' for x in items) + '</ul>')
+            out.append(f'<{kind}>' + ''.join(f'<li>{inline_md(x)}</li>' for x in items) + f'</{kind}>')
             items.clear()
+        kind = None
+
+    def cells(row):
+        # Consume escape pairs before delimiters, including inside inline code (D36).
+        s = row.strip()
+        parts, cell = [], []
+        i = 0
+        while i < len(s):
+            if s[i] == "\\" and i + 1 < len(s):
+                cell.append("|" if s[i + 1] == "|" else s[i:i + 2])
+                i += 2
+            elif s[i] == "|":
+                parts.append("".join(cell).strip())
+                cell = []
+                i += 1
+            else:
+                cell.append(s[i])
+                i += 1
+        parts.append("".join(cell).strip())
+        if s.startswith("|"):
+            parts.pop(0)
+        if s.endswith("|") and parts and parts[-1] == "":
+            parts.pop()
+        return parts
+
+    def flush_table():
+        if not table:
+            return
+        if len(table) >= 2 and re.fullmatch(r"\|?(\s*:?-{2,}:?\s*\|)*\s*:?-{2,}:?\s*\|?", table[1].strip()):
+            head, body = cells(table[0]), [cells(r) for r in table[2:]]
+            out.append('<div class="tbl-wrap md-table"><table><thead><tr>'
+                       + "".join(f"<th>{inline_md(c)}</th>" for c in head) + "</tr></thead><tbody>"
+                       + "".join("<tr>" + "".join(f"<td>{inline_md(c)}</td>" for c in r) + "</tr>" for r in body)
+                       + "</tbody></table></div>")
+        else:                                     # pipes, but not a table: plain text
+            para.extend(table)
+            flush_para()
+        table.clear()
 
     for line in lines:
-        if line.strip().startswith("```"):
-            flush_para(); flush_items()
-            if code:
-                out.append('</code></pre>')
-            else:
-                out.append('<pre><code>')
+        s = line.strip()
+        if s.startswith("```"):
+            flush_para(); flush_items(); flush_table()
+            out.append('</code></pre>' if code else '<pre><code>')
             code = not code
         elif code:
             out.append(e(line) + "\n")
-        elif re.match(r"^\s*[-*+]\s+", line):
-            flush_para(); items.append(re.sub(r"^\s*[-*+]\s+", "", line))
-        elif not line.strip():
-            flush_para(); flush_items()
+        elif s.startswith("|"):
+            flush_para(); flush_items(); table.append(line)
         else:
-            flush_items(); para.append(line)
+            flush_table()
+            if m := re.match(r"^(#{3,4})\s+(.*)$", s):
+                flush_para(); flush_items()
+                out.append(f"<h{len(m.group(1))}>{inline_md(m.group(2))}</h{len(m.group(1))}>")
+            elif re.match(r"^\s*[-*+]\s+", line):
+                flush_para()
+                if kind != "ul":
+                    flush_items(); kind = "ul"
+                items.append(re.sub(r"^\s*[-*+]\s+", "", line))
+            elif re.match(r"^\s*\d+[.)]\s+", line):
+                flush_para()
+                if kind != "ol":
+                    flush_items(); kind = "ol"
+                items.append(re.sub(r"^\s*\d+[.)]\s+", "", line))
+            elif not s:
+                flush_para(); flush_items()
+            elif items and line[:1] in (" ", "\t"):   # an indented line continues the item
+                items[-1] += " " + s
+            else:
+                flush_items(); para.append(line)
     if code:
         out.append('</code></pre>')
-    flush_para(); flush_items()
+    flush_table(); flush_para(); flush_items()
     return "".join(out)
 
 
@@ -235,7 +368,7 @@ def read_repo(name: str, path: Path, fetch: bool) -> dict:
         return rec
     if fetch:
         rec["fetched"] = subprocess.run(["git", "-C", str(path), "fetch", "-q", "origin"],
-                                        capture_output=True).returncode == 0
+                                        capture_output=True, env=foreign_git_env()).returncode == 0
     cfg_text = ""
     for branch in ("master", "main"):
         if git(path, "rev-parse", "--verify", "-q", f"origin/{branch}").strip():
@@ -248,6 +381,7 @@ def read_repo(name: str, path: Path, fetch: bool) -> dict:
         return rec
     conf = parse_config_text(cfg_text) if cfg_text else {}
     ref = f"origin/{branch}"
+    rec["retired"] = conf.get("retired_prefixes", "").split()      # KIT-066: the next id continues past these
     rec.update(adopted=bool(cfg_text), prefix=conf.get("prefixes", ""), branch=branch,
                head=git(path, "log", "-1", "--format=%cI", ref).strip()[:16].replace("T", " "))
     vdir = (conf.get("vocabulary_dir") or "vocabulary").strip().strip("/") or "vocabulary"
@@ -280,10 +414,14 @@ def read_repo(name: str, path: Path, fetch: bool) -> dict:
                     have.add(m[1])
     ids = {t["id"] for t in rec["tickets"]}
     if ids:
-        for line in git(path, "log", ref, "-n", "3000", "--format=%h%x09%cI%x09%s").splitlines():
-            h, when, subj = line.split("\t", 2)
-            for i in set(ID_RE.findall(subj)) & ids:
-                rec["commits"].setdefault(i, []).append({"hash": h, "when": when[:16].replace("T", " "), "subject": subj})
+        metadata = commit_metadata(git(path, "log", ref, "-n", "3000", "--format=" + COMMIT_FORMAT))
+        base = commit_base(path)
+        for sha, info in metadata.items():
+            info["url"] = base + sha if base else ""
+            for item in set(ID_RE.findall(info["subject"])) & ids:
+                rec["commits"].setdefault(item, []).append(info)
+        for ticket in rec["tickets"]:
+            attach_history(path, ref, ticket, metadata, base)
     return rec
 
 
@@ -327,7 +465,13 @@ class Model:
         self.new_words = []
         for kind, rows in self.vocab.items():
             for w, row in rows.items():
-                d = stamp(row.get("added", ""))
+                raw = row.get("added", "")
+                d = stamp(raw)
+                if d is None and raw and STAMP_RE.search(raw):
+                    # Already published, so the gate cannot refuse it any more: report it and
+                    # build the board anyway (KIT-070). One bad row used to stop every page.
+                    print(f"gen-board: {kind} word '{w}' has an impossible added date '{raw}' "
+                          f"— left out of New words; correct it in the word list", file=sys.stderr)
                 if d and 0 <= (now.date() - d.date()).days <= 7:   # calendar days: a word added today counts all day
                     self.new_words.append((d, kind, w, row))
         self.new_words.sort(key=lambda x: x[0], reverse=True)
@@ -438,7 +582,8 @@ def nice_max(v: int) -> int:
 
 # ─── rendering ─────────────────────────────────────────────────────────────────────────
 
-LABEL = {"in-progress": "In progress", "queued": "Queued", "blocked": "Blocked", "closed": "Closed"}
+LABEL = {"in-progress": "In progress", "queued": "Backlog",   # KIT-065: the owner's word
+         "blocked": "Blocked", "closed": "Closed"}
 
 
 class Site:
@@ -507,6 +652,8 @@ class Site:
         m, R = self.m, lambda to: self.rel(page, to)
         items = [("home", "Home", "index.html"), ("epics", "Epics", "epics.html"),
                  ("decisions", "Decisions", "decisions.html"), ("metrics", "Metrics", "metrics.html")]
+        if m.conf.get("guide"):                                    # KIT-066
+            items.append(("guide", m.conf["guide"]["label"], "guide.html"))
         navhtml = "".join(f'<a href="{R(h)}"{" aria-current=\"page\"" if k == nav else ""}>{l}</a>' for k, l, h in items)
         c = defaultdict(int)
         for _, t in m.all:
@@ -519,7 +666,7 @@ class Site:
                   f'<span class="proj-v">{e(m.conf["name"])}</span><span class="caret" aria-hidden="true">▾</span></summary>'
                   f'<div class="proj-menu">{portal}<a class="pm" href="{R("index.html")}" aria-current="page"><b>{e(m.conf["name"])}</b>'
                   f'<span class="c">this board</span><span class="s">{len(m.repos)} repositor{"y" if m.single else "ies"} · '
-                  f'{c["in-progress"]} in progress · {c["queued"]} queued</span></a>'
+                  f'{c["in-progress"]} in progress · {c["queued"]} in backlog</span></a>'
                   + (f'<div class="pm-sep"></div><div class="pm-h">Other boards — separate, nothing shared</div>{others}' if others else "")
                   + '</div></details>'
                   if (m.conf["boards"] or m.conf["portal"]) else
@@ -556,18 +703,51 @@ class Site:
             links.append(f'<a href="{self.rel(page, to)}">{e(label)}</a>' if to else f"<span>{e(label)}</span>")
         return '<div class="crumbs">' + "<span>/</span>".join(links) + "</div>"
 
-    def counts(self, tickets):
-        c = defaultdict(int)
-        wk = 0
-        for t in tickets:
-            c[t["state"]] += 1
-            if t["_x"] and (self.m.now - t["_x"]) < timedelta(days=7):
-                wk += 1
-        epics = sum(1 for t in tickets if t["type"] == "EPIC" and t["state"] != "closed")
-        cell = lambda n, lab, cls="": f'<div class="count {cls}"><b>{n}</b><span>{lab}</span></div>'
-        return ('<div class="counts">' + cell(c["in-progress"], "In progress", "live") + cell(c["queued"], "Queued") +
-                cell(c["blocked"], "Blocked", "hot" if c["blocked"] else "") + cell(wk, "Closed in the last 7 days") +
-                cell(epics, "Open epics") + "</div>")
+    def counter_groups(self):
+        """D41: the counter and its page consume the same selection and ordering."""
+        all_ = self.m.all
+        oldest = lambda rt: (rt[1]["_c"] or datetime.min, rt[0]["name"], rt[1]["id"])
+        priority = lambda rt: (rt[1]["priority"], *oldest(rt))
+        return [
+            ("in-progress", "In progress", "Nothing is in progress.", "live",
+             sorted((rt for rt in all_ if rt[1]["state"] == "in-progress"),
+                    key=lambda rt: (rt[1]["_s"] or datetime.min, *oldest(rt)))),
+            ("backlog", "Backlog", "Nothing is in the backlog.", "",
+             sorted((rt for rt in all_ if rt[1]["state"] == "queued"), key=priority)),
+            ("blocked", "Blocked", "Nothing is blocked.", "hot",
+             sorted((rt for rt in all_ if rt[1]["state"] == "blocked"), key=priority)),
+            ("closed-week", "Closed in the last 7 days", "Nothing closed in the last 7 days.", "",
+             sorted((rt for rt in all_ if rt[1]["_x"] and self.m.now - rt[1]["_x"] < timedelta(days=7)),
+                    key=lambda rt: (rt[1]["_x"], *oldest(rt)), reverse=True)),
+            ("open-epics", "Open epics", "There are no open epics.", "",
+             sorted((rt for rt in all_ if rt[1]["type"] == "EPIC" and rt[1]["state"] != "closed"),
+                    key=oldest, reverse=True)),
+        ]
+
+    def counts(self):
+        return '<div class="counts">' + "".join(
+            f'<a class="count {cls if rows else ""}" href="lists/{key}.html">'
+            f'<b>{len(rows)}</b><span>{label}</span></a>'
+            for key, label, _, cls, rows in self.counter_groups()) + "</div>"
+
+    def counter_pages(self):
+        pages = []
+        for key, label, empty, _, tickets in self.counter_groups():
+            page = f"lists/{key}.html"
+            rows = ""
+            for r, t in tickets:
+                extra = self.repo_note(r)
+                if key == "open-epics":
+                    kids = [kt for _, kt in self.m.all if kt["epic"] == t["id"]]
+                    done = sum(kt["state"] == "closed" for kt in kids)
+                    extra += f'<span class="prog">{done} of {len(kids)} stories closed</span>'
+                rows += self.row(page, r, t, extra)
+            body = (f'{self.crumbs(page, [(label, None)])}<h1>{label} '
+                    f'<span class="num">{len(tickets)}</span></h1>'
+                    f'<section class="panel spaced"><div class="panel-b"><div class="rows">{rows}</div>'
+                    + (f'<div class="empty">{empty}</div>' if not tickets else "") + '</div></section>')
+            pages.append((page, self.frame(page, label, "home", body)))
+        return pages
 
     def attention(self):
         out, now = [], self.m.now
@@ -619,9 +799,9 @@ class Site:
                 for when, verb, r, t in m.events()[:14]) or '<div class="empty">No activity yet.</div>'
         tickets = [t for _, t in m.all]
         body = (f'<h1>Right now</h1><div class="sub">{len(m.repos)} repositor{"y" if m.single else "ies"} · {len(tickets)} tickets · '
-                f'as of {at(m.now)}, from each repository\'s <span class="mono">origin</span></div>{self.counts(tickets)}'
+                f'as of {at(m.now)}, from each repository\'s <span class="mono">origin</span></div>{self.counts()}'
                 f'<div class="cols"><div class="stack"><section class="panel"><div class="panel-h"><h2>Needs attention</h2>'
-                f'<span class="prog">{len(att) or ""}</span></div><div class="panel-b">{att_html}</div></section>{table}</div>'
+                f'<span class="prog">{len(att) or ""}</span></div><div class="panel-b">{att_html}</div></section>{self.open_panel(page)}{table}</div>'
                 f'<aside class="panel"><div class="panel-h"><h2>Latest activity</h2></div><div class="panel-b"><div class="feed">{feed}</div></div></aside></div>')
         return page, self.frame(page, "Home", "home", body)
 
@@ -648,7 +828,7 @@ class Site:
                      f'{f" · {len(unset_r)} not set up" if unset_r else ""}</summary><div class="chips">{chips}</div>'
                      f'{f"<div class=chips>{unset}</div>" if unset else ""}</details>')
         return (f'<section class="panel"><div class="panel-h"><h2>{e(heading)}</h2><span class="prog">{len(active)} of {total}</span></div>'
-                f'<div class="tbl-wrap"><table><thead><tr><th>Repository</th><th class="n">In&nbsp;progress</th><th class="n">Queued</th>'
+                f'<div class="tbl-wrap"><table><thead><tr><th>Repository</th><th class="n">In&nbsp;progress</th><th class="n">Backlog</th>'
                 f'<th class="n">Blocked</th><th class="n hide-sm">Closed</th><th class="hide-sm">Closed / week, 12 wks</th><th class="hide-sm">Last activity</th>'
                 f'</tr></thead><tbody>{rows or "<tr><td colspan=7 class=empty>No tickets in this project yet.</td></tr>"}</tbody></table></div>{quiet}</section>')
 
@@ -664,7 +844,7 @@ class Site:
                      f'<td class="n">{(f"<b class=bad>{n["blocked"]}</b>") if n["blocked"] else z(0)}</td><td class="n hide-sm">{n["closed"]}</td>'
                      f'<td class="hide-sm">{sparkline([c for _, c in weekly(ts, self.m.now)])}</td><td class="hide-sm when2">{ago(self.m.now, last)}</td></tr>')
         return (f'<section class="panel"><div class="panel-h"><h2>By area</h2><span class="prog">{len(self.areas(r))} areas</span></div>'
-                f'<div class="tbl-wrap"><table><thead><tr><th>Area</th><th class="n">In&nbsp;progress</th><th class="n">Queued</th><th class="n">Blocked</th>'
+                f'<div class="tbl-wrap"><table><thead><tr><th>Area</th><th class="n">In&nbsp;progress</th><th class="n">Backlog</th><th class="n">Blocked</th>'
                 f'<th class="n hide-sm">Closed</th><th class="hide-sm">Closed / week, 12 wks</th><th class="hide-sm">Last activity</th></tr></thead>'
                 f'<tbody>{rows}</tbody></table></div></section>')
 
@@ -695,7 +875,7 @@ class Site:
         idle_html = (f'<div class="panel-foot">No tickets yet: ' + " · ".join(
             f'<a href="{self.rel(page, self.p_domain(d))}">{e(d)}</a>' for d, *_ in sorted(idle, key=lambda x: x[0].lower())) + "</div>") if idle else ""
         return (f'<section class="panel"><div class="panel-h"><h2>By domain</h2><span class="prog">{len(busy)} of {len(m.domains)} with work</span></div>'
-                f'<div class="tbl-wrap"><table><thead><tr><th>Domain</th><th class="n">In&nbsp;progress</th><th class="n">Queued</th>'
+                f'<div class="tbl-wrap"><table><thead><tr><th>Domain</th><th class="n">In&nbsp;progress</th><th class="n">Backlog</th>'
                 f'<th class="n">Blocked</th><th class="n hide-sm">Closed</th><th class="hide-sm">Closed / week, 12 wks</th><th class="hide-sm">Last activity</th>'
                 f'</tr></thead><tbody>{rows or "<tr><td colspan=7 class=empty>No tickets in this project yet.</td></tr>"}</tbody></table></div>{idle_html}</section>')
 
@@ -708,18 +888,54 @@ class Site:
             ft = row.get("first_ticket", "")
             return (f' · for <a href="{self.rel(page, self.p_ticket(*ids[ft]))}">{e(ft)}</a>' if ft in ids else
                     (f" · for {e(ft)}" if ft and ft != "-" else ""))
+        # KIT-063: words added FOR a ticket are what an agent decided on its own — list them;
+        # a starter list (first_ticket `-`) would bury them, so it is counted on one line.
+        ticketed = [x for x in m.new_words if re.fullmatch(_ID, x[3].get("first_ticket", ""))]
+        starter = len(m.new_words) - len(ticketed)
         items = "".join(
             f'<div class="wl"><span class="{"areachip" if kind == "areas" else "tagchip"}">{e(w)}</span>'
             f'<span>{kind[:-1]} · “{e(row.get("meaning", ""))}” · added {ago(m.now, d)}{first(row)}</span></div>'
-            for d, kind, w, row in m.new_words)
-        return (f'<section class="panel words"><div class="panel-h"><h2>Words added this week</h2><span class="prog">{len(m.new_words) or ""}</span></div>'
+            for d, kind, w, row in ticketed)
+        if starter:
+            items += f'<div class="wl muted">{starter} starter word{"s" if starter != 1 else ""} added (see the lists)</div>'
+        return (f'<section class="panel words"><div class="panel-h"><h2>Words added this week</h2><span class="prog">{len(ticketed) or ""}</span></div>'
                 f'<div class="panel-b">{items or "<div class=empty>No new area or tag words this week.</div>"}</div></section>')
+
+    def open_panel(self, page):
+        """Every open ticket on a many-repository board's home page (KIT-063): In progress,
+        Blocked, Backlog; by priority, then most recent activity; 15 shown, the rest folded."""
+        m = self.m
+        if m.single:
+            return ""
+        prio = {"P1": 0, "P2": 1, "P3": 2, "P4": 3}
+        last = lambda t: max([x for x in (t["_c"], t["_s"], t["_x"]) if x] or [datetime.min])
+        groups = []
+        for s in ("in-progress", "blocked", "queued"):
+            ps = sorted([(r, t) for r, t in m.all if t["state"] == s],
+                        key=lambda p: (prio.get(p[1]["priority"], 2), -last(p[1]).timestamp() if last(p[1]) != datetime.min else 0))
+            groups += [(s, r, t) for r, t in ps]
+        if not groups:
+            return ('<section class="panel"><div class="panel-h"><h2>Open now</h2></div>'
+                    '<div class="panel-b"><div class="empty">Nothing open.</div></div></section>')
+        def render(items):
+            out, cur = "", None
+            for s, r, t in items:
+                if s != cur:
+                    out += f'<div class="lane-h open-h">{self.pill(s)}<span class="num">{sum(1 for g in groups if g[0] == s)}</span></div>'
+                    cur = s
+                out += self.row(page, r, t, self.repo_note(r))
+            return out
+        cap = 15
+        more = (f'<details class="more-items"><summary>Show all {len(groups)}</summary><div class="rows">{render(groups[cap:])}</div></details>'
+                if len(groups) > cap else "")
+        return (f'<section class="panel open-now"><div class="panel-h"><h2>Open now</h2><span class="prog">{len(groups)}</span></div>'
+                f'<div class="panel-b"><div class="rows">{render(groups[:cap])}</div>{more}</div></section>')
 
     def pairs_lane(self, page, key, pairs):
         cap = 8
         head = f'<div class="lane-h">{self.pill(key)}<span class="num">{len(pairs)}</span></div>'
         if not pairs:
-            return f'<section class="lane">{head}<div class="empty">Nothing {LABEL[key].lower()}.</div></section>'
+            return f'<section class="lane">{head}<div class="empty">{"Nothing in the backlog" if key == "queued" else "Nothing " + LABEL[key].lower()}.</div></section>'
         first = "".join(self.row(page, r, t, self.repo_note(r)) for r, t in pairs[:cap])
         rest = "".join(self.row(page, r, t, self.repo_note(r)) for r, t in pairs[cap:])
         more = f'<details class="more-items"><summary>Show all {len(pairs)}</summary><div class="rows">{rest}</div></details>' if rest else ""
@@ -757,6 +973,61 @@ class Site:
                 f'{rows(done) if done else "<div class=empty>Nothing closed yet.</div>"}</div></section></div>')
         return page, self.frame(page, "tag: " + tag, "", body)
 
+    def next_id(self, r):
+        """The next ticket id in a repository, by wi.py's rule (KIT-059): its first active prefix,
+        numbered past everything used under it and under its retired prefixes."""
+        active = (r.get("prefix") or "").split()
+        if not active:
+            return ""
+        pool = {active[0], *r.get("retired", [])}
+        used = [int(t["id"].rsplit("-", 1)[1]) for t in r["tickets"] if t["id"].rsplit("-", 1)[0] in pool]
+        return f"{active[0]}-{(max(used) if used else 0) + 1:03d}"
+
+    def guide_page(self):
+        """KIT-066: the project's own words on how tickets are made, then the facts a reader
+        cannot work out alone — every repository's prefix and next id — and the word lists."""
+        m, page, g = self.m, "guide.html", self.m.conf["guide"]
+        try:
+            text = Path(g["path"]).read_text(encoding="utf-8")
+        except OSError:
+            text = f"## Missing\n\nThe guide file {g['path']} could not be read."
+        secs = re.split(r"^## ", re.sub(r"^# .*\n", "", text, count=1, flags=re.M), flags=re.M)
+        intro, secs = secs[0].strip(), secs[1:]
+        panels = (f'<section class="panel"><div class="panel-b pad guide">{markdown_body(intro)}</div></section>' if intro else "")
+        for s in secs:
+            title, _, body = s.partition("\n")
+            panels += (f'<section class="panel"><div class="panel-b pad guide"><h2>{e(title.strip())}</h2>'
+                       f'{markdown_body(body)}</div></section>')
+        order = sorted(m.repos, key=lambda r: (m.dom(r) == "Other", m.dom(r).lower(), r["name"]))
+        rows = "".join(
+            f'<tr><td>{e(m.dom(r)) if m.has_domains else ""}</td><td><a class="rname" href="{self.rel(page, self.p_repo(r))}">{e(r["name"])}</a></td>'
+            f'<td class="mono">{e(r.get("prefix") or "—")}</td><td class="mono muted">{e(" ".join(r.get("retired", [])) or "—")}</td>'
+            f'<td class="mono"><b>{e(self.next_id(r)) or "not set up"}</b></td></tr>' for r in order)
+        table = (f'<section class="panel"><div class="panel-h"><h2>Every repository: its prefix and next ticket id</h2>'
+                 f'<span class="prog">{len(m.repos)}</span></div><div class="tbl-wrap"><table><thead><tr>'
+                 f'<th>{"Domain" if m.has_domains else ""}</th><th>Repository</th><th>Prefix</th><th>Retired prefix (old ids stay valid)</th>'
+                 f'<th>Next id</th></tr></thead><tbody>{rows}</tbody></table></div></section>')
+        words = ""
+        for kind in ("areas", "tags"):
+            rows_ = m.vocab.get(kind)
+            if not rows_:
+                continue
+            items = "".join(
+                f'<tr><td><span class="{"areachip" if kind == "areas" else "tagchip"}">{e(w)}</span></td>'
+                + (f'<td class="muted" colspan="2">merged into <b>{e(r["merged_into"])}</b></td>' if r.get("merged_into") else
+                   f'<td>{e(r.get("meaning", ""))}</td><td class="muted">{e(", ".join(r["synonyms"]))}</td>') + "</tr>"
+                for w, r in sorted(rows_.items()))
+            words += (f'<section class="panel"><div class="panel-h"><h2>{"Areas — one per ticket" if kind == "areas" else "Tags — none or several"}</h2>'
+                      f'<span class="prog">{len(rows_)}</span></div>'
+                      # D38: synonyms explain the canonical word; creation requires it.
+                      f'<div class="panel-b pad"><p>For new tickets, use the word in the first column. '
+                      f'Alternative names help you find it; they are not accepted when creating a ticket.</p></div>'
+                      f'<div class="tbl-wrap"><table><thead><tr><th>Word</th><th>Meaning</th>'
+                      f'<th>Alternative names (synonyms)</th></tr></thead><tbody>{items}</tbody></table></div></section>')
+        body = (f'{self.crumbs(page, [(g["label"], None)])}<h1>{e(g["label"])}</h1>'
+                f'<div class="stack" style="margin-top:18px">{panels}{table}{words}</div>')
+        return page, self.frame(page, g["label"], "guide", body)
+
     def stale(self, r):
         return ' <span class="stale" title="git fetch failed — showing what origin last held">stale</span>' if r["fetched"] is False else ""
 
@@ -764,7 +1035,7 @@ class Site:
         cap = 8
         head = f'<div class="lane-h">{self.pill(key)}<span class="num">{len(items)}</span></div>'
         if not items:
-            return f'<section class="lane">{head}<div class="empty">Nothing {LABEL[key].lower()}.</div></section>'
+            return f'<section class="lane">{head}<div class="empty">{"Nothing in the backlog" if key == "queued" else "Nothing " + LABEL[key].lower()}.</div></section>'
         first = "".join(self.row(page, r, t) for t in items[:cap])
         rest = "".join(self.row(page, r, t) for t in items[cap:])
         more = f'<details class="more-items"><summary>Show all {len(items)}</summary><div class="rows">{rest}</div></details>' if rest else ""
@@ -815,6 +1086,32 @@ class Site:
                 f'<tbody>{closed_rows}</tbody></table></div></section><div class="stack">{area_panel}{dec_panel}</div></div>')
         return page, self.frame(page, area or r["name"], "", body)
 
+    def update_log_table(self, t, raw=""):
+        # Non-log prose belongs above the table; committed source lines stay untouched (D42).
+        prose = "\n".join(line for line in raw.splitlines() if not LOG_ROW.fullmatch(line))
+        rendered = []
+        for row in t.get("history", []):
+            note = row["note"]
+            event = ("Reopened" if "reopened:" in note or "status: CLOSED -> OPEN" in note else
+                     "Created" if note.startswith("created") else "Work started" if note.startswith("started") else
+                     "Closed" if note.startswith("closed") else "Updated")
+            subject = re.sub(r"^" + re.escape(t["id"]) + r"\s*:\s*", "", row.get("subject", ""))
+            what = e(subject or event)
+            if row.get("url"):
+                what = f'<a href="{e(row["url"])}">{what}</a>'
+            detail = " ".join(note.split()[:12])
+            if len(detail) > 90:
+                detail = detail[:87] + "…"
+            if detail != note:
+                detail = detail.rstrip("…") + "…"
+            rendered.append(f'<tr><td class="nowrap">{e(row["when"])}</td><td>{e(row["actor"])}</td>'
+                            f'<td>{what}<div class="log-detail">{event}'
+                            + (f' · {e(detail)}' if event == "Updated" else "") + '</div></td></tr>')
+        return (markdown_body(prose) + '<div class="tbl-wrap update-log"><table><thead><tr>'
+                '<th>When (ET)</th><th>Who</th><th>What happened</th></tr></thead><tbody>'
+                + "".join(rendered) + '</tbody></table></div>'
+                + ('<p class="empty">No update history has been recorded for this ticket.</p>' if not rendered else ""))
+
     def ticket_page(self, r, t):
         m, page = self.m, self.p_ticket(r, t)
         epic = next(((er, et) for er, et in m.all if et["id"] == t["epic"] and et["type"] == "EPIC"), None) if t["epic"] else None
@@ -839,8 +1136,16 @@ class Site:
                 sid = f"{base}-{n}"; n += 1
             seen_slugs.add(sid)
             section_links.append(f'<a class="sec" href="#{e(sid)}">{e(section["title"])}</a>')
-            rendered_sections.append(f'<section class="ticket-section" id="{e(sid)}"><h2>{e(section["title"])}</h2>{markdown_body(section["body"])}</section>')
+            content = (self.update_log_table(t, section["body"]) if section["title"].lower() == "update log"
+                       else markdown_body(section["body"]))
+            rendered_sections.append(f'<section class="ticket-section" id="{e(sid)}"><h2>{e(section["title"])}</h2>{content}</section>')
+        if not any(section["title"].lower() == "update log" for section in t["sections"]):
+            section_links.append('<a class="sec" href="#update-log">Update Log</a>')
+            rendered_sections.append('<section class="ticket-section" id="update-log"><h2>Update Log</h2>'
+                                     + self.update_log_table(t) + '</section>')
         commits = r["commits"].get(t["id"], [])
+        modifier = (t["history"][-1]["actor"] if t.get("history") else
+                    next((c["actor"] for c in commits if c.get("actor")), ""))
         crumbs = self.crumbs(page, ([(m.dom(r), self.p_domain(m.dom(r)))] if m.has_domains else []) + [(r["name"], self.p_repo(r))]
                              + ([(t["area"], self.p_area(r, t["area"]))] if m.single and t["area"] else []) + [(t["id"], None)])
         tag_links = " ".join(f'<a class="tagchip" href="{self.rel(page, self.p_tag(x))}">{e(x)}</a>' for x in t.get("tags", []))
@@ -858,12 +1163,17 @@ class Site:
                 f'<dt>Area</dt><dd>{f"<a href={self.rel(page, self.p_area(r, t["area"]))}>{e(t["area"])}</a>" if t["area"] else "—"}</dd>'
                 + (f'<dt>Tags</dt><dd>{tag_links}</dd>' if tag_links else "")
                 + f'<dt>Epic</dt><dd>{f"<a href={self.rel(page, self.p_ticket(*epic))}>{e(t["epic"])}</a>" if epic else (e(t["epic"]) or "—")}</dd>'
+                f'<dt>Created by</dt><dd>{e(t.get("creator", "")) or "—"}</dd>'
+                f'<dt>Last updated by</dt><dd>{e(modifier) or "—"}</dd>'
+                f'<dt>Closed by</dt><dd>{e(t.get("closer", "")) or "—"}</dd>'
                 f'<dt>Estimate</dt><dd class="num">{e(t["estimate"]) or "—"}</dd><dt>Priority</dt><dd>{self.pri(t)}</dd></dl></div></section>'
                 f'<section class="panel"><div class="panel-h"><h2>Decisions carried</h2></div><div class="panel-b">' + (
                     '<div class="rows">' + "".join(f'<div class="row two"><span class="id">{e(d)}</span><span class="t dtitle">{e(dt[d])}</span></div>' for d in cited) + "</div>"
                     if cited else '<div class="empty">None cited.</div>') +
                 f'</div></section><section class="panel"><div class="panel-h"><h2>Commits</h2><span class="prog">{len(commits)}</span></div><div class="panel-b">' + (
-                    "".join(f'<div class="commit"><span class="h">{e(c["hash"])}</span><span class="s">{e(c["subject"])}</span><span class="d">{e(c["when"][5:10])}</span></div>'
+                    "".join(f'<div class="commit"><span class="h">{e(c["hash"])}</span><span class="s">'
+                            + (f'<a href="{e(c["url"])}">{e(c["subject"])}</a>' if c.get("url") else e(c["subject"]))
+                            + f'</span><span class="d">{e(c["when"][5:10])}</span></div>'
                             for c in commits[:15]) or '<div class="empty">No commits name this ticket yet.</div>') + "</div></section></div></div>")
         return page, self.frame(page, t["id"], "", body)
 
@@ -991,6 +1301,7 @@ class Site:
     def build(self) -> list[str]:
         m, pages = self.m, []
         pages.append(self.home())
+        pages += self.counter_pages()
         for r in m.repos:
             pages.append(self.repo_page(r))
             for t in r["tickets"]:
@@ -999,6 +1310,8 @@ class Site:
                 for a, *_ in self.areas(r):
                     pages.append(self.repo_page(r, a))
         pages += [self.epics_page(), self.decisions_page(), self.metrics_page()]
+        if m.conf.get("guide"):                             # KIT-066
+            pages.append(self.guide_page())
         if m.has_domains:                                   # KIT-061
             pages += [self.domain_page(d) for d in m.domains]
         pages += [self.tag_page(g) for g in sorted({x for _, t in m.all for x in t.get("tags", [])})]
@@ -1078,6 +1391,8 @@ h2{font-size:12px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;
 .counts{display:flex;flex-wrap:wrap;margin-top:20px;background:var(--surface);border:1px solid var(--rule);border-radius:10px;overflow:hidden}
 .count{flex:1 1 150px;padding:14px 18px;border-right:1px solid var(--rule-soft);display:flex;flex-direction:column;gap:2px}.count:last-child{border-right:0}
 .count b{font-family:var(--mono);font-size:26px;font-weight:500;font-variant-numeric:tabular-nums;line-height:1.1}.count span{font-size:12.5px;color:var(--muted)}
+.count{color:var(--ink);text-decoration:none;cursor:pointer}.count:hover{background:var(--surface-2);text-decoration:none}.count:focus-visible{outline:3px solid var(--accent);outline-offset:-3px}
+.log-detail{font-size:12px;color:var(--muted);margin-top:3px}.update-log td{vertical-align:top}
 .count.hot b{color:var(--bug)}.count.live b{color:var(--accent)}
 .id{font-family:var(--mono);font-size:13px;font-weight:500;color:var(--ink-soft);white-space:nowrap}
 .type{display:inline-block;font-size:11px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;padding:1px 6px;border-radius:4px;white-space:nowrap}
@@ -1122,7 +1437,10 @@ td.n,th.n{text-align:right;font-family:var(--mono);font-variant-numeric:tabular-
 .tagchip.big{font-size:22px;padding:2px 10px}.ev .ttl.strong{color:var(--ink)}
 .dname{font-weight:600;display:block}.dsub{display:block;color:var(--faint);font-size:12.5px;margin-top:1px}
 .panel-foot{padding:10px 16px 14px;color:var(--faint);font-size:13px;border-top:1px solid var(--rule-soft)}.panel-foot a{color:var(--muted)}.panel-foot a:hover{color:var(--accent)}
+.md-table{margin:10px 0 14px}.md-table table{font-size:13.5px}.ticket-section ol,.guide ol{padding-left:22px}.ticket-section h3,.guide h3{font-size:15px;margin:16px 0 6px}
+.guide p{max-width:78ch}.guide ul{max-width:78ch;padding-left:20px}.guide h2{margin-bottom:8px}.guide pre{overflow-x:auto}
 .words .wl{display:flex;gap:10px;align-items:baseline;flex-wrap:wrap;padding:5px 0;font-size:13px;color:var(--muted)}.words .wl a{color:var(--accent)}
+.open-now .open-h{margin:10px 0 2px}.open-now .rows .open-h:first-child{margin-top:0}
 .more-items summary{justify-content:center;margin:6px 0 8px;padding:7px;border:1px dashed var(--rule);border-radius:7px;color:var(--muted);font-weight:500;font-size:13px}
 .more-items summary:hover{color:var(--accent);border-color:var(--accent)}.more-items[open] summary{display:none}
 dl.facts{display:grid;grid-template-columns:auto minmax(0,1fr);gap:8px 14px;margin:0;font-size:14px}dl.facts dt{color:var(--faint);font-size:12.5px;padding-top:1px}

@@ -15,8 +15,8 @@ scripts/mirror-scope.sh
 scripts/repo_files.py
 scripts/stamp-ticket-times.py
 scripts/wi.py
-scripts/git-hooks/applypatch-msg
 scripts/git-hooks/_chain.sh
+scripts/git-hooks/applypatch-msg
 scripts/git-hooks/commit-msg
 scripts/git-hooks/post-applypatch
 scripts/git-hooks/post-checkout
@@ -27,6 +27,6 @@ scripts/git-hooks/pre-applypatch
 scripts/git-hooks/pre-auto-gc
 scripts/git-hooks/pre-commit
 scripts/git-hooks/pre-merge-commit
-scripts/git-hooks/prepare-commit-msg
 scripts/git-hooks/pre-push
 scripts/git-hooks/pre-rebase
+scripts/git-hooks/prepare-commit-msg

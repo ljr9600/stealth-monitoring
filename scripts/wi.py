@@ -87,7 +87,7 @@ def listing() -> int:
         rows.append((field(t, "priority").lower() or DEFAULT, state,
                      field(t, "id"), field(t, "type"), title,
                      field(t, "estimate") or "—"))
-    for group, label in (("in-progress", "IN PROGRESS"), ("blocked", "BLOCKED"), ("queued", "QUEUED")):
+    for group, label in (("in-progress", "IN PROGRESS"), ("blocked", "BLOCKED"), ("queued", "BACKLOG")):
         sel = [r for r in rows if r[1] == group]
         if not sel:
             continue
@@ -192,7 +192,11 @@ def reopen(args: list[str]) -> int:
                                 str(sib), str(dest)], check=False)
     print(f"  {live.name}: CLOSED -> OPEN, reopened {n}")
     print(f"  superseded close ({was_closed} by {was_closer}) recorded in {REOPEN_HEADER}")
-    print(f"  commit it on a {field(live.read_text(), 'type').lower()} branch for {item}")
+    typ = field(live.read_text(), 'type').lower()
+    if typ == "epic":
+        print(f"  commit it on {CFG.get('default_branch', 'master')} (epic maintenance) for {item}")
+    else:
+        print(f"  commit it on a {typ} branch for {item}")
     return 0
 
 

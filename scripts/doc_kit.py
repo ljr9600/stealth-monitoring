@@ -28,12 +28,32 @@ ACTORS = {"CODEX": "Codex", "CLAUDE": "Claude", "HUMAN": "Human"}
 
 
 def current_actor(root: Path) -> str:
-    """Return the process-local ticketing actor."""
+    """Ticket writes need a process-local actor; shared Git config is not identity (D42)."""
     raw = os.environ.get("TICKETING_ACTOR", "").strip()
-    if not raw:
-        raw = subprocess.run(["git", "-C", str(root), "config", "--get", "ticketing.actor"],
-                             capture_output=True, text=True).stdout.strip()
-    return ACTORS.get(raw.upper(), "Human")
+    if raw.upper() not in ACTORS:
+        raise SystemExit("Set TICKETING_ACTOR before writing tickets: export TICKETING_ACTOR=Codex "
+                         "(or Claude; Human only for an actual human).")
+    return ACTORS[raw.upper()]
+
+
+# --- reading ANOTHER repository from inside a hook (KIT-069) ---------------------------
+#
+# git exports its repository variables to a hook. Inherited by a `git -C <other repo>` they
+# win over `-C`: in a linked worktree GIT_DIR is absolute and names the CALLER, so a read
+# meant for the epics clone quietly reads the member instead. That switched the scope word
+# lists off (the member has no vocabulary file, and "no file" means "no list") and made
+# every `epic:` look missing. The kit's own tests have unset these since TEST-017; the
+# production reads never did. Local reads keep them on purpose — a staged read in a
+# worktree must see that worktree's index, which is exactly what GIT_INDEX_FILE names.
+GIT_REPO_VARS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+                 "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_COMMON_DIR", "GIT_PREFIX",
+                 "GIT_NAMESPACE", "GIT_QUARANTINE_PATH")
+
+
+def foreign_git_env() -> dict:
+    """os.environ minus git's repository variables — for `git -C` against a repo that is
+    not the one this process was started in (the epics clone, a board member)."""
+    return {k: v for k, v in os.environ.items() if k not in GIT_REPO_VARS}
 
 
 def load_config(root: Path) -> dict:
@@ -200,7 +220,8 @@ def epics_at_master(eroot: Path, cfg: dict) -> dict[str, dict]:
     ref = f"origin/{cfg.get('default_branch', 'master')}"
 
     def git(*a):
-        r = subprocess.run(["git", "-C", str(eroot), *a], capture_output=True, text=True)
+        r = subprocess.run(["git", "-C", str(eroot), *a], capture_output=True, text=True,
+                           env=foreign_git_env())
         return r.stdout if r.returncode == 0 else ""
 
     out: dict[str, dict] = {}
@@ -279,10 +300,11 @@ def vocab_source(root: Path, cfg: dict, kind: str, staged: bool = False) -> tupl
     if eroot is not None:
         ref = f"origin/{cfg.get('default_branch', 'master')}"
         if subprocess.run(["git", "-C", str(eroot), "rev-parse", "--verify", "--quiet", ref],
-                          capture_output=True).returncode != 0:
+                          capture_output=True, env=foreign_git_env()).returncode != 0:
             return None, (f"UNAVAILABLE: {eroot} has no {ref} to read the word lists from — "
                           f"run: bash scripts/epics.sh fetch")
-        r = subprocess.run(["git", "-C", str(eroot), "show", f"{ref}:{rel}"], capture_output=True, text=True)
+        r = subprocess.run(["git", "-C", str(eroot), "show", f"{ref}:{rel}"], capture_output=True, text=True,
+                           env=foreign_git_env())
         return (r.stdout if r.returncode == 0 else None), f"{eroot.name} {ref}:{rel}"
     if staged:
         r = subprocess.run(["git", "-C", str(root), "show", f":{rel}"], capture_output=True, text=True)

@@ -52,6 +52,7 @@ import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
+from collections import Counter
 from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -250,12 +251,12 @@ def fingerprint(old_text: str | None, new_text: str) -> str:
     return h.hexdigest()[:8]
 
 
-def already_logged(text: str, fp: str) -> bool:
+def already_logged(text: str, fp: str, actor: str) -> bool:
     last = None
     for line in text.split("\n"):
         if line.startswith("- "):
             last = line
-    return last is not None and last.endswith(f"[{fp}]")
+    return last is not None and last.endswith(f"[{fp}]") and f" — {actor} — " in last
 
 
 def append_update_log(text: str, entry: str) -> str:
@@ -279,6 +280,14 @@ def staged_ticket_touches(root: Path, tdir: str) -> list[tuple[str | None, str]]
     (a close's `git mv` must diff against the pre-move blob, not report 'created')."""
     out = git(root, "diff", "--cached", "--name-status", "-M")
     pat = re.compile(rf"^{re.escape(tdir)}/(closed/)?{ID_RE}-[^/]+\.md$")
+    # A large close/reopen can fall below Git's rename-similarity threshold (D43).
+    # Match a deleted ticket to its added counterpart by immutable ID, not prose similarity.
+    deleted = {}
+    for line in out.splitlines():
+        parts = line.split("\t")
+        if parts[0] == "D" and pat.match(parts[1]):
+            item = re.search(rf"({ID_RE})-[^/]+\.md$", parts[1]).group(1)
+            deleted.setdefault(item, []).append(parts[1])
     changes = []
     for line in out.splitlines():
         parts = line.split("\t")
@@ -287,6 +296,11 @@ def staged_ticket_touches(root: Path, tdir: str) -> list[tuple[str | None, str]]
             old_path, new_path = parts[1], parts[2]
         elif status == "A":
             old_path, new_path = None, parts[1]
+            if pat.match(new_path):
+                item = re.search(rf"({ID_RE})-[^/]+\.md$", new_path).group(1)
+                candidates = deleted.get(item, [])
+                if len(candidates) == 1:
+                    old_path = candidates[0]
         elif status == "M":
             old_path, new_path = parts[1], parts[1]
         else:  # D, C -- not an update to narrate
@@ -294,6 +308,54 @@ def staged_ticket_touches(root: Path, tdir: str) -> list[tuple[str | None, str]]
         if pat.match(new_path):
             changes.append((old_path, new_path))
     return changes
+
+
+def incoming_history(root: Path, tdir: str, new_path: str) -> list[str]:
+    """D47: incoming committed rows are history, even before a manual merge completes."""
+    refs = set()
+    for name in ("MERGE_HEAD", "CHERRY_PICK_HEAD", "REBASE_HEAD"):
+        control = git(root, "rev-parse", "--git-path", name).strip()
+        if not control:
+            continue
+        path = Path(control)
+        if not path.is_absolute():
+            path = root / path
+        if path.is_file():
+            refs.update(line.strip() for line in path.read_text().splitlines()
+                        if re.fullmatch(r"[0-9a-f]{40,64}", line.strip()))
+    item = re.match(rf"({ID_RE})-", Path(new_path).name).group(1)
+    texts = []
+    for ref in sorted(refs):
+        # The incoming ticket may be open or closed, or have changed its title.
+        for candidate in git(root, "ls-tree", "-r", "--name-only", ref, "--", tdir).splitlines():
+            if Path(candidate).name.startswith(item + "-") and candidate.endswith(".md"):
+                texts.append(git(root, "show", f"{ref}:{candidate}"))
+    return texts
+
+
+def without_pending_log_rows(new_text: str, old_text: str | None,
+                             incoming: list[str] = ()) -> str:
+    """Preserve every committed row; supersede only generated rows from a refused attempt (D42)."""
+    pattern = re.compile(r"^- .* ET — .* — .*\[[0-9a-f]{8}\]$")
+    def rows(text):
+        inside = False
+        for line in text.splitlines(keepends=True):
+            if line.startswith("## "):
+                inside = line.strip() == UPDATE_LOG_HEADER
+            yield line, inside and bool(pattern.fullmatch(line.rstrip("\n")))
+    committed = Counter(line.rstrip("\n") for line, is_row in rows(old_text or "") if is_row)
+    for text in incoming:
+        # Maximum multiplicity preserves duplicate committed rows without counting
+        # a shared ancestor twice merely because it appears in both parents.
+        committed |= Counter(line.rstrip("\n") for line, is_row in rows(text) if is_row)
+    kept = []
+    for line, is_row in rows(new_text):
+        key = line.rstrip("\n")
+        if not is_row:
+            kept.append(line)
+        elif committed[key]:
+            kept.append(line); committed[key] -= 1
+    return "".join(kept)
 
 
 def update_log(root: Path, tdir: str, actor: str, now: str) -> list[str]:
@@ -309,9 +371,10 @@ def update_log(root: Path, tdir: str, actor: str, now: str) -> list[str]:
             old_text = None  # HEAD had no such blob -- treat as a creation
         note = summarize_change(old_text, new_text)
         fp = fingerprint(old_text, new_text)
-        if already_logged(new_text, fp):
+        if already_logged(new_text, fp, actor):
             continue
-        updated = append_update_log(new_text, f"{now} — {actor} — {note} [{fp}]")
+        updated = append_update_log(without_pending_log_rows(new_text, old_text, incoming_history(root, tdir, new_path)),
+                                    f"{now} — {actor} — {note} [{fp}]")
         if updated != new_text:
             new_file.write_text(updated, encoding="utf-8")
             touched.append(new_path)
@@ -322,6 +385,14 @@ def precommit(root: Path) -> int:
     tdir, btypes = _cfg(root)
     staged = git(root, "diff", "--cached", "--name-only").splitlines()
     added = git(root, "diff", "--cached", "--name-only", "--diff-filter=A").splitlines()
+    # Refuse a missing actor before writing any ticket; machine-only commits need none (D42).
+    branch = git(root, "symbolic-ref", "--quiet", "--short", "HEAD").strip()
+    bm = re.fullmatch(rf"(?:{btypes})/({ID_RE})", branch)
+    hits = sorted((root / tdir).glob(f"{bm.group(1)}-*.md")) if bm else []
+    first_work = len(hits) == 1 and any(not split_front_matter(hits[0].read_text())[0].get(k)
+                                      for k in ("started", "starter"))
+    if not staged_ticket_touches(root, tdir) and not first_work:
+        return 0
     now = now_et()
     actor = current_actor(root)
     stamped: list[str] = []

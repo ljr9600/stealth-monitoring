@@ -66,6 +66,7 @@ type:       STORY
 status:     OPEN
 priority:   P3
 area:       {{AREA}}
+tags:
 opened:     {{DATE}}
 creator:    {{ACTOR}}
 opener:     {{ACTOR}}
@@ -106,6 +107,11 @@ same commit as the close; declaring it is not doing it.</p>
 <!-- machine-filled: decisions recorded while this item was worked, copied verbatim from the decision files (KIT-017) -->
 <p>To cite a decision that DROVE this item, write <code>{{Dn}}</code> anywhere above; it expands here at commit.</p>
 <h2 id="background">Background</h2>
+<h2 id="reopen-history">Reopen history</h2>
+<!-- machine-appended by `python3 scripts/wi.py reopen <ID> "<reason>"` (KIT-054): one entry
+     per reopen — when, who reopened it, the close it reverses and that close's actor, and
+     why it did not hold. Append-only; `reopened:` in the front matter counts these. -->
+
 <h2 id="update-log">Update Log</h2>
 <!-- machine-appended by scripts/stamp-ticket-times.py (KIT-050) on every commit that
      touches this file: timestamp, actor (creator/closer identity or whoever is

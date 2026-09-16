@@ -18,6 +18,7 @@ repo="$(git rev-parse --show-toplevel)"
 cfg() { [ -f "$repo/docs/doc-kit.config" ] || return 0; sed -nE "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*(.*)$/\1/p" "$repo/docs/doc-kit.config" 2>/dev/null | head -1 || true; }
 TDIR="$(cfg tickets_dir)"; TDIR="${TDIR:-docs/tickets}"; TDIR="${TDIR%/}"
 staged="$(git diff --cached --name-only)"
+# D46: checker output belongs to this invocation, never a machine-wide scratch file.
 
 # The decisions index is DERIVED from the decision files (KIT-016): regenerate and stage it
 # every commit, so a hand edit never survives and an added decision is indexed at once.
@@ -41,8 +42,8 @@ if grep -qE "^${TDIR}/.*\.md$" <<<"$staged"; then
   fail=0
   for chk in check-ticket-shape.py check-item-references.py check-doc-impact.py check-ticket-status.py; do
     [ -f "$repo/scripts/$chk" ] || continue
-    if ! python3 "$repo/scripts/$chk" >/tmp/ticketing-template-precommit.log 2>&1; then
-      echo "pre-commit: $chk FAILED:" >&2; sed 's/^/    /' /tmp/ticketing-template-precommit.log | tail -20 >&2; fail=1
+    if ! check_output="$(python3 "$repo/scripts/$chk" 2>&1)"; then
+      echo "pre-commit: $chk FAILED:" >&2; printf '%s\n' "$check_output" | sed 's/^/    /' | tail -20 >&2; fail=1
     fi
   done
   [ "$fail" = 0 ] || { echo "pre-commit: work items REJECTED — fix the problems above." >&2; exit 1; }
@@ -52,15 +53,15 @@ fi
 # ticket whose area/tags are new or changed, and a staged list file, are checked.
 VDIR="$(cfg vocabulary_dir)"; VDIR="${VDIR:-vocabulary}"; VDIR="${VDIR%/}"
 if [ -f "$repo/scripts/check-vocabulary.py" ] && grep -qE "^(${TDIR}/.*\.md|${VDIR}/[^/]*\.tsv)$" <<<"$staged"; then
-  python3 "$repo/scripts/check-vocabulary.py" >/tmp/ticketing-template-vocab.log 2>&1 \
-    || { sed 's/^/    /' /tmp/ticketing-template-vocab.log >&2; echo "pre-commit: REJECTED — areas/tags must come from the word lists (python3 scripts/wi.py words)." >&2; exit 1; }
-  grep -E "^word lists:" /tmp/ticketing-template-vocab.log || true
+  check_output="$(python3 "$repo/scripts/check-vocabulary.py" 2>&1)" \
+    || { printf '%s\n' "$check_output" | sed 's/^/    /' >&2; echo "pre-commit: REJECTED — areas/tags must come from the word lists (python3 scripts/wi.py words)." >&2; exit 1; }
+  grep -E "^word lists:" <<<"$check_output" || true
 fi
 # An epics repo checks its registry against the repos on every commit (KIT-018): a row's
 # prefix equals what the repo declares, no prefix twice, every claimant has a row.
 if [ -f "$repo/.epics-root" ] && [ -f "$repo/scripts/check-scope.py" ]; then
-  python3 "$repo/scripts/check-scope.py" >/tmp/ticketing-template-scope.log 2>&1 || { sed 's/^/    /' /tmp/ticketing-template-scope.log >&2; echo "pre-commit: REJECTED — the scope registry (repos.tsv) disagrees with the repos." >&2; exit 1; }
-  tail -1 /tmp/ticketing-template-scope.log
+  check_output="$(python3 "$repo/scripts/check-scope.py" 2>&1)" || { printf '%s\n' "$check_output" | sed 's/^/    /' >&2; echo "pre-commit: REJECTED — the scope registry (repos.tsv) disagrees with the repos." >&2; exit 1; }
+  tail -1 <<<"$check_output"
 fi
 # Then, in order (KIT-023, KIT-031): the repo's OWN scripts/git-hooks/pre-commit.local
 # (generators, renderers, targeted tests — versioned, never touched by an upgrade), and

@@ -143,8 +143,11 @@ def check_lists(problems: list[str]) -> int:
             miss = [c for c in ("added", "first_ticket", "reason") if not r.get(c)]
             if miss:
                 problems.append(f"{rel}: new word '{w}' needs {', '.join(miss)} (when, which ticket needed it or -, why)")
-            if r.get("added") and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", r["added"]):
-                problems.append(f"{rel}: new word '{w}': added must be a date, YYYY-MM-DD")
+            if r.get("added") and not real_date(r["added"]):
+                # The shape alone let 2026-02-30 through, and the board then crashed on it for
+                # every repository in the scope (KIT-070).
+                problems.append(f"{rel}: new word '{w}': added '{r['added']}' is not a real date "
+                                f"— write YYYY-MM-DD for a day that exists")
             ft = r.get("first_ticket", "")
             if ft and ft != "-" and not re.fullmatch(ID_RE, ft):
                 problems.append(f"{rel}: new word '{w}': first_ticket must be a ticket id or -")
@@ -154,6 +157,18 @@ def check_lists(problems: list[str]) -> int:
                 problems.append(f"{rel}: {', '.join(gone)} removed — a word is never deleted (old tickets use it); "
                                 f"set its merged_into instead")
     return n
+
+
+def real_date(s: str) -> bool:
+    """YYYY-MM-DD naming a day that exists — 2024-02-29 yes, 2026-02-30 no (KIT-070)."""
+    import datetime
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", s or ""):
+        return False
+    try:
+        datetime.date.fromisoformat(s)
+        return True
+    except ValueError:
+        return False
 
 
 def main() -> int:

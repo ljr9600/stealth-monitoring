@@ -22,7 +22,7 @@ import re
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from doc_kit import load_config  # noqa: E402
+from doc_kit import load_config, foreign_git_env  # noqa: E402
 
 SKIP_DIRS = {".git", "node_modules", "target", "vendor", ".claude", "__pycache__", "closed"}
 
@@ -59,7 +59,7 @@ def member_config(repo: Path):
         return None
     for ref in ("origin/master", "origin/main", "master", "main"):
         r = subprocess.run(["git", "-C", str(repo), "show", f"{ref}:docs/doc-kit.config"],
-                           capture_output=True, text=True)
+                           capture_output=True, text=True, env=foreign_git_env())
         if r.returncode == 0:
             return parse_config(r.stdout)
     if (repo / "docs" / "doc-kit.config").is_file():
@@ -144,7 +144,7 @@ def main() -> int:
             problems.append(f"{r['repo']}: epics_scope is '{cfg.get('epics_scope', '')}', not '{scope}'")
     listed = {r["path"] for r in rows}
     for path, cfg in scan(root, scope).items():
-        if path == here.relative_to(root).as_posix():
+        if (root / path).resolve() == here.resolve():  # outside-root worktrees are valid (D40)
             continue
         if path not in listed:
             problems.append(f"{path}: claims epics_scope={scope} but has no row in repos.tsv "

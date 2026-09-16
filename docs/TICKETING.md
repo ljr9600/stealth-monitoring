@@ -23,7 +23,7 @@ epics repo; `epics_scope = <name>` means a work repo whose epics live in `<name>
 
 ```bash
 git fetch -q                       # the hooks compare against origin/master
-python3 scripts/wi.py              # this repo's board: in flight, blocked, queued, by priority
+python3 scripts/wi.py              # this repo's board: in flight, blocked, backlog, by priority
 bash scripts/epics.sh fetch        # work repo with a scope: refresh the epics clone
 ```
 
@@ -72,15 +72,21 @@ Rules the hooks apply at this moment:
 - **One creation per commit.** `wi.py new` refuses while another new ticket is
   uncommitted. Create → commit → push → next.
 - **Actor identity is explicit.** Set `TICKETING_ACTOR=Codex`, `Claude`, or `Human`.
+  Ticket creation, reopen and commit stamping refuse a missing or invalid value before
+  writing a ticket. Shared `git config ticketing.actor` is not used; each process names
+  its actor. Use `Human` only for a human's work (D42).
   New tickets record `creator:` and `opener:`; the first work and close hooks record
   `starter:` and `closer:`. Commits touching Codex/Claude-created tickets carry one
   `Agent: Codex` or `Agent: Claude` trailer.
-- **Every touch is narrated, not just the three moments (KIT-050).** A ticket's
-  `## Update Log` section gets one line per commit that changes it — timestamp, the
-  same actor identity as above, and what changed (a field diff, which body section
-  moved, or `created`/`started`/`closed` for those three). Append-only: an existing
-  line is never rewritten, and re-running the hook before an actual commit does not
-  duplicate the pending line.
+- **Every touch is narrated, not just the three moments (KIT-050, KIT-075).** The
+  ticket's append-only Update Log records its time, actor and change fingerprint. On the
+  board it appears as **When (ET) · Who · What happened**, with the actual commit subject
+  and a link to the change on GitHub/GitLab when the remote supplies one. Fingerprints
+  stay internal. The board resolves each line through Git history, including renamed
+  tickets, and uses an existing Agent trailer to correct old guessed actor displays.
+  Non-log prose appears above the table. Creator, last modifier and closer remain visible
+  separately. A rejected attempt's uncommitted generated row is replaced on an edited
+  retry; every already-committed row remains unchanged.
 - **What a creation commit may carry on master:** the ticket file, a decision recorded
   with it (`wi.py decision new`, and the index the hook regenerates), the paths in
   `maintenance_paths`, and the rendered `.html` sibling of any of those (a repo whose
@@ -142,7 +148,10 @@ Rules the hooks apply at this moment:
   a synonym as its word. Tags get their own pages, and new words appear under "Words added
   this week". A many-repository board can also group repositories by domain (a `domain`
   column in `repos.tsv`) and lead each row with the title (`row_style = title-first`), with
-  the ID in small type at the end (KIT-061).
+  the ID in small type at the end (KIT-061). Its home page lists every open ticket under
+  "Open now". Every home-page counter opens the list of tickets it counts, including
+  empty lists and tickets closed in the last seven days. "Words added this week" lists words added for a ticket and counts a starter
+  list (`first_ticket` = `-`) on one line (KIT-063).
 - **The type is one of** `EPIC STORY TASK BUG SPIKE`, chosen by what *closing* needs:
 
   | type | closes when |
@@ -365,7 +374,7 @@ ships a passthrough for every client hook it has no rule for (`post-commit`, `pr
 not ship (`KIT_FILES` is its manifest).
 
 The payload is `kit/`; the repo's own `scripts/` and `docs/` are an *installed copy* of
-it. After changing anything under `kit/`, re-run `bash install.sh .` so the copy the
+it. After changing anything under `kit/`, re-run `bash install.sh . --prefixes KIT` so the copy the
 hooks actually execute is the new one, and bump `VERSION` in the release ticket. Every
 change rides a `KIT-nnn` ticket like anywhere else; `bash tests/run-all.sh` is the gate.
 

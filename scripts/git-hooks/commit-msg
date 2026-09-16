@@ -127,7 +127,8 @@ if [ -n "$staged_all" ]; then
   # A rendered X.html rides wherever its X.md may (KIT-033): a repo's own hook that renders
   # an .html beside each staged .md (DECISIONS_INDEX.html…) must not turn a ticket-only
   # commit into "work". Judged by the .md path, so nothing else widens.
-  if ! sed 's/\.html$/.md/' <<<"$staged_all" | grep -qvE "^(${TDIR}/|(${maint_re})(/|$))"; then
+  # Drain the producer under pipefail; grep -q can turn a match into SIGPIPE (D39).
+  if ! sed 's/\.html$/.md/' <<<"$staged_all" | grep -vE "^(${TDIR}/|(${maint_re})(/|$))" >/dev/null; then
     present="$(git diff --cached --name-only --diff-filter=AMR | grep -E "^${TDIR}/(closed/)?${PFX}-[0-9]{3}-.*\.md$" || true)"
     added="$(git diff --cached --name-only --diff-filter=A || true)"
     qualifies=0
@@ -201,7 +202,7 @@ MSG
   # ticket created inside a feature branch is invisible to everyone until merge.
   if git rev-parse --verify --quiet "origin/$DEFAULT_BRANCH" >/dev/null 2>&1; then
     if ! git ls-tree -r --name-only "origin/$DEFAULT_BRANCH" -- "$TDIR" 2>/dev/null \
-         | grep -qE "/(closed/)?${want}-[^/]*\.md$"; then
+         | grep -E "/(closed/)?${want}-[^/]*\.md$" >/dev/null; then
       cat >&2 <<MSG
 
   COMMIT REJECTED — $want has no ticket on origin/$DEFAULT_BRANCH yet (GOV-011).

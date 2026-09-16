@@ -79,7 +79,7 @@ after that the hooks teach.</p>
 epics repo; <code>epics_scope = &lt;name&gt;</code> means a work repo whose epics live in <code>&lt;name&gt;-epics</code>).</p>
 <h2 id="1-start-of-a-session">1. Start of a session</h2>
 <pre><code class="language-bash">git fetch -q                       # the hooks compare against origin/master
-python3 scripts/wi.py              # this repo's board: in flight, blocked, queued, by priority
+python3 scripts/wi.py              # this repo's board: in flight, blocked, backlog, by priority
 bash scripts/epics.sh fetch        # work repo with a scope: refresh the epics clone
 </code></pre>
 <h3 id="working-from-a-git-worktree">Working from a Git worktree</h3>
@@ -105,11 +105,11 @@ appears on either.</p>
 ticket first</strong> — nothing is too small for a TASK.</p>
 <h2 id="2-create-a-ticket-one-at-a-time-on-master-then-push">2. Create a ticket — one at a time, on master, then push</h2>
 <pre><code class="language-bash">git switch master &amp;&amp; git pull -q
-python3 scripts/wi.py new MDAPI-012 STORY &quot;Serve-time split adjustment&quot; --area marketdata --epic MKTD-003
-#   → docs/tickets/MDAPI-012-serve-time-split-adjustment.md   (from docs/templates/ticket-STORY.md)
-$EDITOR docs/tickets/MDAPI-012-*.md       # fill the contract (below)
-git add docs/tickets/MDAPI-012-*.md
-git commit -m &quot;MDAPI-012: file — Serve-time split adjustment (ticket creation)&quot;
+python3 scripts/wi.py new MARKETDATA_API-012 STORY &quot;Serve-time split adjustment&quot; --area marketdata --epic STEALTH-012
+#   → docs/tickets/MARKETDATA_API-012-serve-time-split-adjustment.md   (from docs/templates/ticket-STORY.md)
+$EDITOR docs/tickets/MARKETDATA_API-012-*.md       # fill the contract (below)
+git add docs/tickets/MARKETDATA_API-012-*.md
+git commit -m &quot;MARKETDATA_API-012: file — Serve-time split adjustment (ticket creation)&quot;
 git push                                  # BEFORE branching: the hooks check origin/master
 </code></pre>
 <p>Rules the hooks apply at this moment:</p>
@@ -117,15 +117,21 @@ git push                                  # BEFORE branching: the hooks check or
 <li><strong>One creation per commit.</strong> <code>wi.py new</code> refuses while another new ticket is
   uncommitted. Create → commit → push → next.</li>
 <li><strong>Actor identity is explicit.</strong> Set <code>TICKETING_ACTOR=Codex</code>, <code>Claude</code>, or <code>Human</code>.
+  Ticket creation, reopen and commit stamping refuse a missing or invalid value before
+  writing a ticket. Shared <code>git config ticketing.actor</code> is not used; each process names
+  its actor. Use <code>Human</code> only for a human's work (D42).
   New tickets record <code>creator:</code> and <code>opener:</code>; the first work and close hooks record
   <code>starter:</code> and <code>closer:</code>. Commits touching Codex/Claude-created tickets carry one
   <code>Agent: Codex</code> or <code>Agent: Claude</code> trailer.</li>
-<li><strong>Every touch is narrated, not just the three moments (KIT-050).</strong> A ticket's
-  <code>## Update Log</code> section gets one line per commit that changes it — timestamp, the
-  same actor identity as above, and what changed (a field diff, which body section
-  moved, or <code>created</code>/<code>started</code>/<code>closed</code> for those three). Append-only: an existing
-  line is never rewritten, and re-running the hook before an actual commit does not
-  duplicate the pending line.</li>
+<li><strong>Every touch is narrated, not just the three moments (KIT-050, KIT-075).</strong> The
+  ticket's append-only Update Log records its time, actor and change fingerprint. On the
+  board it appears as <strong>When (ET) · Who · What happened</strong>, with the actual commit subject
+  and a link to the change on GitHub/GitLab when the remote supplies one. Fingerprints
+  stay internal. The board resolves each line through Git history, including renamed
+  tickets, and uses an existing Agent trailer to correct old guessed actor displays.
+  Non-log prose appears above the table. Creator, last modifier and closer remain visible
+  separately. A rejected attempt's uncommitted generated row is replaced on an edited
+  retry; every already-committed row remains unchanged.</li>
 <li><strong>What a creation commit may carry on master:</strong> the ticket file, a decision recorded
   with it (<code>wi.py decision new</code>, and the index the hook regenerates), the paths in
   <code>maintenance_paths</code>, and the rendered <code>.html</code> sibling of any of those (a repo whose
@@ -133,12 +139,58 @@ git push                                  # BEFORE branching: the hooks check or
 <li><strong>The id is <code>PREFIX-NNN</code></strong>, and the prefix must be declared in <code>docs/doc-kit.config</code>
   (<code>prefixes =</code>) or already in use. Anything else id-shaped (<code>SHA-256</code>, <code>ADR-007</code>) is
   prose, not a ticket — and words like <code>API</code>, <code>SHA</code>, <code>RFC</code>, <code>TLS</code> can never be prefixes
-  (<code>prefix_denylist</code>). Choosing one: 2–10 capitals, unique across the scope; in a
-  multi-repo scope <strong>one prefix per repo</strong>, derived from the repo name (<code>marketdata-api →
-  MDAPI</code>, <code>uw-flow-indexer → UWFI</code>); in a single-repo product, one prefix per area
-  (open-teleporter's <code>HOST</code>, <code>RFB</code>, <code>SEC</code>). Don't mix the two conventions in one scope.</li>
-<li><strong>The type is one of</strong> <code>EPIC STORY TASK BUG SPIKE</code>, chosen by what <em>closing</em> needs:</li>
+  (<code>prefix_denylist</code>). Choosing one: 2–24 characters, capital letters with whole words
+  joined by single underscores, unique across the scope (KIT-057). <strong>Spell words out</strong>:
+  the people reading the board should never have to decode an abbreviation. In a
+  multi-repo scope, use <strong>one prefix per repo</strong>, the repo's name in words
+  (<code>marketdata-api → MARKETDATA_API</code>, <code>uw-flow-indexer → UW_FLOW_INDEXER</code>). A scope may
+  pin the exact transformation in a decision in its epics repo. In a single-repo
+  product, use one prefix per area (open-teleporter's <code>HOST</code>, <code>RFB</code>). Don't mix the two
+  conventions in one scope. Older 2–10 letter prefixes stay valid.</li>
+<li><strong>Renaming a prefix.</strong> An id can never change, because it is written into pushed
+  commits. So a renamed prefix is <strong>retired</strong>, not removed (KIT-059). Put the new prefix
+  in <code>prefixes =</code> and move the old one to <code>retired_prefixes =</code>. In a scope, update the
+  repository's <code>repos.tsv</code> row in the epics repo in the same change (<code>story_prefix</code>, and a
+  <code>retired_prefixes</code> column). Old tickets keep their ids and can still be worked, cited and
+  closed. <code>wi.py new</code> refuses the old prefix, and new numbers continue past its highest one:</li>
 </ul>
+<p><code>prefixes         = TWITTER_SCRAPER
+  retired_prefixes = TWSCR     # TWSCR-001…020 stay valid; the next new id is TWITTER_SCRAPER-021</code>
+- <strong>Areas and tags</strong> (KIT-060). <code>area:</code> is exactly one word naming the lasting part of the
+  system a ticket concerns; the board groups by it. <code>tags:</code> holds none or several words,
+  comma-separated, naming topics that cut across repos: a feed, production, an incident.
+  When the project keeps word lists (<code>vocabulary/areas.tsv</code>, <code>vocabulary/tags.tsv</code>), both
+  must come from them. In a scoped repo those lists are the scope's, kept in
+  <code>&lt;scope&gt;-epics</code> and read at <code>origin</code> like epics. Run <code>python3 scripts/wi.py words</code>, pick
+  a word (a listed synonym tells you which word to use), and pass <code>--area</code> / <code>--tags</code> to
+  <code>wi.py new</code>. The hooks refuse anything else on a ticket whose area or tags you set or
+  change. An old ticket keeping an old word is left alone.</p>
+<p><strong>Adding a word is yours to decide; nobody approves it.</strong> The rules:
+  1. If an existing word or one of its synonyms covers the idea, use it. Never add a
+     plural, a variant or an abbreviation of a word that is already there.
+  2. An area names a lasting part of the system that more than one ticket will concern. A
+     topic that concerns just one ticket is a tag, or nothing.
+  3. Lowercase whole words joined by <code>-</code>, at most 20 characters. Acronyms only if the
+     codebase already uses them (<code>api</code>, <code>ui</code>). Never <code>misc</code>, <code>other</code>, <code>general</code> or
+     <code>various</code>.
+  4. Add a row with <code>word</code>, a one-line <code>meaning</code> a person understands, <code>synonyms</code>,
+     <code>added</code>, <code>first_ticket</code> (the ticket you are about to file), <code>reason</code>. Commit it alone,
+     as <code>words: add &lt;word&gt; (&lt;area|tag&gt;) — &lt;why&gt;</code>, on the default branch of the repo that
+     holds the lists, and push. Then file the ticket.
+  5. Never delete a row. To replace a word, set its <code>merged_into</code> to the word that
+     replaces it. Old tickets then read as the new word, and no ticket file changes.</p>
+<p><code>word  meaning synonyms    added   first_ticket    reason  merged_into
+  security  who may do what, and secrets    sec, tls, auth  2026-09-15  -   starter list
+  backtesting   replaying past market data to test a strategy       2026-09-16  QUANT_LAB-001   no area covered it</code></p>
+<p>On the board, a ticket shows under the live word: a merged word reads as its successor and
+  a synonym as its word. Tags get their own pages, and new words appear under "Words added
+  this week". A many-repository board can also group repositories by domain (a <code>domain</code>
+  column in <code>repos.tsv</code>) and lead each row with the title (<code>row_style = title-first</code>), with
+  the ID in small type at the end (KIT-061). Its home page lists every open ticket under
+  "Open now". Every home-page counter opens the list of tickets it counts, including
+  empty lists and tickets closed in the last seven days. "Words added this week" lists words added for a ticket and counts a starter
+  list (<code>first_ticket</code> = <code>-</code>) on one line (KIT-063).
+- <strong>The type is one of</strong> <code>EPIC STORY TASK BUG SPIKE</code>, chosen by what <em>closing</em> needs:</p>
 <table>
 <thead>
 <tr>
@@ -201,12 +253,12 @@ retrying. A remote ticket always wins; never publish two tickets with one ID. If
 branch or commit already names the old ID, update the branch name and commit subject
 before continuing. This is discovery-and-retry, not a locking system.</p>
 <h2 id="3-work-on-a-branch-named-for-the-item">3. Work — on a branch named for the item</h2>
-<pre><code class="language-bash">git switch -c story/MDAPI-012            # story/ bug/ task/ spike/ — exactly one item per branch
+<pre><code class="language-bash">git switch -c story/MARKETDATA_API-012            # story/ bug/ task/ spike/ — exactly one item per branch
 ... edit, test ...
-git commit -m &quot;MDAPI-012: adjust at serve time, not at ingest
+git commit -m &quot;MARKETDATA_API-012: adjust at serve time, not at ingest
 
-Follows the approach settled in MKTD-003; supersedes MDAPI-004.&quot;
-git push -u origin story/MDAPI-012
+Follows the approach settled in STEALTH-012; supersedes MARKETDATA_API-004.&quot;
+git push -u origin story/MARKETDATA_API-012
 </code></pre>
 <ul>
 <li><strong>Every commit's subject names the branch's item.</strong> Other items go in the body —
@@ -228,25 +280,54 @@ git push -u origin story/MDAPI-012
 <p>Before closing, ask: <em>what does a reader of the contract or the subsystem document now
 believe that this change made false?</em> Fix each of those documents <strong>in the closing
 commit</strong> — the Documentation impact section is executed, not declared.</p>
-<pre><code class="language-bash">sed -i 's/^status:.*$/status:     CLOSED/' docs/tickets/MDAPI-012-*.md
-git mv docs/tickets/MDAPI-012-*.md docs/tickets/closed/
+<pre><code class="language-bash">sed -i 's/^status:.*$/status:     CLOSED/' docs/tickets/MARKETDATA_API-012-*.md
+git mv docs/tickets/MARKETDATA_API-012-*.md docs/tickets/closed/
 git add &lt;the documents the impact section named&gt;
-git commit -m &quot;MDAPI-012: serve-time adjustment, docs updated (closes)&quot;
+git commit -m &quot;MARKETDATA_API-012: serve-time adjustment, docs updated (closes)&quot;
 bash tests/…                             # the repo's gate, green
-git switch master &amp;&amp; git merge --no-ff story/MDAPI-012 &amp;&amp; git push
-git branch -d story/MDAPI-012
+git switch master &amp;&amp; git merge --no-ff story/MARKETDATA_API-012 &amp;&amp; git push
+git branch -d story/MARKETDATA_API-012
 </code></pre>
 <p>The hook stamps <code>closed:</code> (and repairs a missing <code>started:</code>) when the file is staged
-under <code>closed/</code>. Status is <code>OPEN | BLOCKED | CLOSED</code> — "in progress" is derived from
+under <code>closed/</code>. If the close turns out to be wrong, reverse it with section 4a's
+<code>wi.py reopen</code> — never by hand. Status is <code>OPEN | BLOCKED | CLOSED</code> — "in progress" is derived from
 commits, never written.</p>
+<h2 id="4a-reopen-when-a-close-did-not-hold">4a. Reopen — when a close did not hold</h2>
+<p>A close is the only lifecycle event with no reviewer, so reversing one leaves evidence
+rather than quietly undoing itself:</p>
+<pre><code class="language-bash">python3 scripts/wi.py reopen MARKETDATA_API-012 &quot;the healthcheck was never run in a container&quot;
+git switch -c bug/MARKETDATA_API-012            # a reopen is WORK, not a creation — it needs a branch
+git add docs/tickets/MARKETDATA_API-012-*.md
+git commit -m &quot;MARKETDATA_API-012: reopen — the close did not hold&quot;
+git push -u origin bug/MARKETDATA_API-012
+</code></pre>
+<p>The branch step is not optional: the default branch takes merges, reverts, ticket <em>creations</em>
+and the configured machine commits, and a reopen is none of those. (If the item's old branch
+still exists from the close that did not hold, <code>git branch -d &lt;type&gt;/&lt;ID&gt;</code> it first — it is
+merged.)</p>
+<p>It moves the file back out of <code>closed/</code>, sets <code>status: OPEN</code>, increments <code>reopened:</code>, and
+appends one entry to an append-only <code>## Reopen history</code>:</p>
+<pre><code>- **Reopen 1** — 2026-09-15 09:12 ET — reopened by Claude — reverses the close of
+  2026-09-15 08:12 ET by Codex — the healthcheck was never run in a container
+</code></pre>
+<p>The superseded <code>closed:</code>/<code>closer:</code> MOVE into that entry and are cleared from the front
+matter. That is deliberate (D24): stamps are never overwritten, so leaving them would make
+the eventual re-close credit the actor whose close did not hold, and hide the one who
+actually fixed it. Nothing is lost — the old close is in the history entry, permanently.</p>
+<p>The gate enforces both halves: an OPEN or BLOCKED item carrying <code>closed:</code> or <code>closer:</code> is
+refused, and <code>reopened: n</code> must equal the number of <code>## Reopen history</code> entries. Reopening
+by hand trips one of those; use the command. <code>python3 scripts/wi.py</code> marks a returning item
+<code>[reopened xN]</code> on the board, so an item that keeps coming back cannot look like a fresh one.</p>
+<p>Then work it like any other open item (section 3) and close it again (section 4) — the
+second close stamps the real closer, because the first one is no longer in the way.</p>
 <h2 id="5-epics-work-that-spans-repositories">5. Epics — work that spans repositories</h2>
 <p>A story must own one self-contained test. A change touching two repositories cannot,
 so <strong>it is an EPIC with one STORY per repository</strong>. Stories live where the code
 lives; the epic lives in the scope's epics repo.</p>
 <pre><code class="language-bash">cd ~/dev/stealth-epics                      # the epics repo for scope &quot;stealth&quot;
 git pull -q
-python3 scripts/wi.py new MKTD-003 EPIC &quot;Split adjustment across the market-data stack&quot;
-git add docs/tickets &amp;&amp; git commit -m &quot;MKTD-003: file — Split adjustment across the market-data stack (ticket creation)&quot;
+python3 scripts/wi.py new STEALTH-012 EPIC &quot;Split adjustment across the market-data stack&quot;
+git add docs/tickets &amp;&amp; git commit -m &quot;STEALTH-012: file — Split adjustment across the market-data stack (ticket creation)&quot;
 git push                                    # an epic exists for others ONLY at origin/master
 </code></pre>
 <ul>
@@ -306,7 +387,7 @@ each one it found as <code>kept:</code> (KIT-031).</p>
 </tr>
 <tr>
 <td>is CLOSED</td>
-<td>reopen it or open a new item — unless this commit is the close (stage the move)</td>
+<td><code>wi.py reopen &lt;ID&gt; "&lt;why&gt;"</code> (section 4a) or open a new item — unless this commit is the close (stage the move)</td>
 </tr>
 <tr>
 <td>is an EPIC, a tracking parent</td>
@@ -366,7 +447,7 @@ ships a passthrough for every client hook it has no rule for (<code>post-commit<
 <code>decisions_index = none</code>. The installer refuses to overwrite any <code>scripts/</code> file it did
 not ship (<code>KIT_FILES</code> is its manifest).</p>
 <p>The payload is <code>kit/</code>; the repo's own <code>scripts/</code> and <code>docs/</code> are an <em>installed copy</em> of
-it. After changing anything under <code>kit/</code>, re-run <code>bash install.sh .</code> so the copy the
+it. After changing anything under <code>kit/</code>, re-run <code>bash install.sh . --prefixes KIT</code> so the copy the
 hooks actually execute is the new one, and bump <code>VERSION</code> in the release ticket. Every
 change rides a <code>KIT-nnn</code> ticket like anywhere else; <code>bash tests/run-all.sh</code> is the gate.</p>
 <p>Four lessons from the first day of dogfooding, each of which cost a cycle:</p>
