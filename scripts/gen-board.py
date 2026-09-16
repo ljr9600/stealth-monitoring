@@ -229,7 +229,7 @@ def parse_ticket(text: str, path: str) -> dict | None:
         raw = raw.strip()
         paras = [p.strip() for p in raw.split("\n\n")
                  if p.strip() and not p.strip().startswith("<!--")]
-        if paras:
+        if title.strip().casefold() == "summary" and paras:
             summary = re.sub(r"\s+", " ", paras[0])
         sections.append({"title": title.strip(), "body": raw})
     status = fm.get("status", "").upper() or ("CLOSED" if "/closed/" in path else "OPEN")
